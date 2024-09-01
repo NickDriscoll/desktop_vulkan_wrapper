@@ -14,6 +14,12 @@ Graphics_Device :: struct {
     device: vk.Device,
     pipeline_cache: vk.PipelineCache,
     
+    // The Vulkan queues that the device will submit on
+    // May be aliases of each other if e.g. the GPU doesn't have
+    // an async compute queue
+    graphics_queue: vk.Queue,
+    compute_queue: vk.Queue,
+    transfer_queue: vk.Queue,
 
 }
 
@@ -36,7 +42,7 @@ Init_Parameters :: struct {
     window_support: bool        //Will this device need to draw to window surface swapchains?
 }
 
-vulkan_init :: proc(using feature_set: ^Init_Parameters) -> Graphics_Device {
+vulkan_init :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     fmt.println("vk init go!")
 
     // @TODO: Support other OSes
@@ -62,11 +68,12 @@ vulkan_init :: proc(using feature_set: ^Init_Parameters) -> Graphics_Device {
                 api_version_int = vk.API_VERSION_1_3
         }
 
+        extensions: [dynamic]cstring
+        defer delete(extensions)
+        
         // Instead of forcing the caller to explicitly provide
         // the extensions they want to enable, I want to provide high-level
         // idioms that cover many extensions in the same logical category
-        extensions: [dynamic]cstring
-
         if window_support {
             append(&extensions, vk.KHR_SURFACE_EXTENSION_NAME)
             when ODIN_OS == .Windows {
@@ -78,7 +85,7 @@ vulkan_init :: proc(using feature_set: ^Init_Parameters) -> Graphics_Device {
                 append(&extensions, "VK_KHR_xlib_surface")
             }
         }
-
+        
         app_info := vk.ApplicationInfo {
             sType = .APPLICATION_INFO,
             pNext = nil,
@@ -108,7 +115,57 @@ vulkan_init :: proc(using feature_set: ^Init_Parameters) -> Graphics_Device {
 
     // Create Vulkan device
     phys_device: vk.PhysicalDevice
+    device: vk.Device
     {
+        phys_device_count : u32 = 0
+        vk.EnumeratePhysicalDevices(inst, &phys_device_count, nil)
+        
+        phys_devices: [dynamic]vk.PhysicalDevice
+        resize(&phys_devices, int(phys_device_count))
+        defer delete(phys_devices)
+        vk.EnumeratePhysicalDevices(inst, &phys_device_count, raw_data(phys_devices))
+        
+        // Select the physical device to use
+        // @NOTE: We only support using a single physical device at once
+        features: vk.PhysicalDeviceFeatures2
+        for pd in phys_devices {
+            // Query this physical device's properties
+            vk12_props: vk.PhysicalDeviceVulkan12Properties
+            vk12_props.sType = .PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES
+            props: vk.PhysicalDeviceProperties2
+            props.sType = .PHYSICAL_DEVICE_PROPERTIES_2
+            props.pNext = &vk12_props
+            vk.GetPhysicalDeviceProperties2(pd, &props)
+
+            
+            if props.properties.deviceType == .DISCRETE_GPU {
+                // Check physical device features
+                features.sType = .PHYSICAL_DEVICE_FEATURES_2
+                vk.GetPhysicalDeviceFeatures2(pd, &features)
+
+                phys_device = pd
+            }
+        }
+
+        assert(phys_device != nil, "Didn't find vkPhysicalDevice")
+
+        // Query the physical device's queue family properties
+        queue_family_count : u32 = 0
+        vk.GetPhysicalDeviceQueueFamilyProperties2(phys_device, &queue_family_count, nil)
+
+        qfps: [dynamic]vk.QueueFamilyProperties2
+        resize(&qfps, int(queue_family_count))
+        defer delete(qfps)
+        for &qfp in qfps {
+            qfp.sType = .QUEUE_FAMILY_PROPERTIES_2
+        }
+        vk.GetPhysicalDeviceQueueFamilyProperties2(phys_device, &queue_family_count, raw_data(qfps))
+
+        for qfp in qfps {
+            fmt.printfln("%#v", qfp.queueFamilyProperties)
+        }
+
+        // Create logical device
 
     }
 
