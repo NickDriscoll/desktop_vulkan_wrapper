@@ -158,7 +158,7 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
             props.pNext = &vk12_props
             vk.GetPhysicalDeviceProperties2(pd, &props)
 
-            
+            // @TODO: Do something more sophisticated than picking the first DISCRETE_GPU
             if props.properties.deviceType == .DISCRETE_GPU {
                 // Check physical device features
                 features.sType = .PHYSICAL_DEVICE_FEATURES_2
@@ -185,6 +185,8 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
             qfp.sType = .QUEUE_FAMILY_PROPERTIES_2
         }
         vk.GetPhysicalDeviceQueueFamilyProperties2(phys_device, &queue_family_count, raw_data(qfps))
+
+        // @TODO: Query for Sync2 support, we're making it mandatory, folks
 
         // Determine available queue family types
         for qfp, i in qfps {
