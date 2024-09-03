@@ -7,6 +7,32 @@ import vk "vendor:vulkan"
 
 import win32 "core:sys/windows"
 
+API_Version :: enum {
+    Vulkan12,
+    Vulkan13
+}
+
+Semaphore_Info :: struct {
+    type: vk.SemaphoreType,
+    init_value: u64,
+}
+
+Init_Parameters :: struct {
+    // Vulkan instance creation parameters
+    app_name: cstring,
+    app_version: u32,
+    engine_name: cstring,
+    engine_version: u32,
+    api_version: API_Version,
+    
+    allocation_callbacks: ^vk.AllocationCallbacks,
+    
+    frames_in_flight: u32,      // Maximum number of command buffers active at once
+    
+    
+    window_support: bool        // Will this device need to draw to window surface swapchains?
+}
+
 Graphics_Device :: struct {
     // Basic Vulkan objects that every app definitely needs
     instance: vk.Instance,
@@ -28,34 +54,15 @@ Graphics_Device :: struct {
     transfer_command_pool: vk.CommandPool,
     gfx_command_buffers: [dynamic]vk.CommandBuffer,
     compute_command_buffers: [dynamic]vk.CommandBuffer,
-    transfer_command_buffers: [dynamic]vk.CommandBuffer
+    transfer_command_buffers: [dynamic]vk.CommandBuffer,
+
+    // Handle_Maps of all Vulkan objects
+    semaphores: Handle_Map(vk.Semaphore),
+    pipelines: Handle_Map(vk.Pipeline),
+
 
 }
-
-API_Version :: enum {
-    Vulkan10,
-    Vulkan11,
-    Vulkan12,
-    Vulkan13
-}
-
-Init_Parameters :: struct {
-    // Vulkan instance creation parameters
-    app_name: cstring,
-    app_version: u32,
-    engine_name: cstring,
-    engine_version: u32,
-    api_version: API_Version,
-
-    allocation_callbacks: ^vk.AllocationCallbacks,
-
-    frames_in_flight: u32,      // Maximum number of command buffers active at once
-
-    
-    window_support: bool        // Will this device need to draw to window surface swapchains?
-}
-
-vulkan_init :: proc(using params: ^Init_Parameters) -> Graphics_Device {
+create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     assert(frames_in_flight > 0)
 
     log.log(.Info, "vk init go!")
@@ -73,10 +80,6 @@ vulkan_init :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     {
         api_version_int: u32
         switch api_version {
-            case .Vulkan10:
-            case .Vulkan11:
-                //Vulkan 1.0 is hot garbage
-                panic("Minimum supported Vulkan is 1.2")
             case .Vulkan12:
                 api_version_int = vk.API_VERSION_1_2
             case .Vulkan13:
@@ -343,7 +346,7 @@ vulkan_init :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         }
     }
 
-    return Graphics_Device {
+    gd := Graphics_Device {
         instance = inst,
         physical_device = phys_device,
         device = device,
@@ -357,7 +360,40 @@ vulkan_init :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         transfer_command_pool = transfer_command_pool,
         gfx_command_buffers = gfx_command_buffers,
         compute_command_buffers = compute_command_buffers,
-        transfer_command_buffers = transfer_command_buffers
+        transfer_command_buffers = transfer_command_buffers,
     }
+
+    // Init Handle_Maps
+    {
+        hm_init(&gd.semaphores)
+        hm_init(&gd.pipelines)
+    }
+
+    return gd
 }
 
+create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> Handle {
+    t_info := vk.SemaphoreTypeCreateInfo {
+        sType = .SEMAPHORE_TYPE_CREATE_INFO,
+        pNext = nil,
+        semaphoreType = info.type,
+        initialValue = info.init_value
+    }
+    s_info := vk.SemaphoreCreateInfo {
+        sType = .SEMAPHORE_CREATE_INFO,
+        pNext = &t_info,
+        flags = nil
+    }
+    s: vk.Semaphore
+    if vk.CreateSemaphore(gd.device, &s_info, gd.alloc_callbacks, &s) != .SUCCESS {
+        log.error("Failed to create semaphore.")
+    }
+    return hm_insert(&gd.semaphores, s)
+}
+
+destroy_semaphore :: proc(gd: ^Graphics_Device, handle: Handle) -> bool {
+    semaphore := hm_get(&gd.semaphores, handle) or_return
+    vk.DestroySemaphore(gd.device, semaphore^, gd.alloc_callbacks)
+    
+    return true
+}
