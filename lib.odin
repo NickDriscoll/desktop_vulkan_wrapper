@@ -3,9 +3,12 @@ package desktop_vulkan_wrapper
 import "core:fmt"
 import "core:os"
 import "core:log"
+import "vendor:sdl2"
 import vk "vendor:vulkan"
 
 import win32 "core:sys/windows"
+
+import hm "handlemap"
 
 API_Version :: enum {
     Vulkan12,
@@ -31,6 +34,7 @@ Init_Parameters :: struct {
     
     
     window_support: bool        // Will this device need to draw to window surface swapchains?
+
 }
 
 Graphics_Device :: struct {
@@ -40,10 +44,21 @@ Graphics_Device :: struct {
     device: vk.Device,
     pipeline_cache: vk.PipelineCache,
     alloc_callbacks: ^vk.AllocationCallbacks,
+
+    // Objects required to support windowing
+    // Basically every app will use these, but maybe
+    // these could be factored out
+    surface: vk.SurfaceKHR,
+    swapchain: vk.SwapchainKHR,
+
+    frames_in_flight: u32,
     
     // The Vulkan queues that the device will submit on
     // May be aliases of each other if e.g. the GPU doesn't have
     // an async compute queue
+    gfx_queue_family: u32,
+    compute_queue_family: u32,
+    transfer_queue_family: u32,
     gfx_queue: vk.Queue,
     compute_queue: vk.Queue,
     transfer_queue: vk.Queue,
@@ -57,22 +72,18 @@ Graphics_Device :: struct {
     transfer_command_buffers: [dynamic]vk.CommandBuffer,
 
     // Handle_Maps of all Vulkan objects
-    semaphores: Handle_Map(vk.Semaphore),
-    pipelines: Handle_Map(vk.Pipeline),
+    semaphores: hm.Handle_Map(vk.Semaphore),
+    pipelines: hm.Handle_Map(vk.Pipeline),
 
 
 }
+
 create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     assert(frames_in_flight > 0)
 
     log.log(.Info, "vk init go!")
 
-    // @TODO: Support other OSes
-    when ODIN_OS == .Windows {
-        vk_dll := win32.LoadLibraryW(win32.utf8_to_wstring("vulkan-1.dll"))
-        get_instance_proc_address := auto_cast win32.GetProcAddress(vk_dll, "vkGetInstanceProcAddr")
-        vk.load_proc_addresses_global(get_instance_proc_address)
-    }
+    vk.load_proc_addresses_global(sdl2.Vulkan_GetVkGetInstanceProcAddr())
 
     // Create Vulkan instance
     // @TODO: Look into vkEnumerateInstanceVersion()
@@ -173,6 +184,7 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
         }
 
         assert(phys_device != nil, "Didn't find vkPhysicalDevice")
+        fmt.printfln("%#v", features)
 
         // Query the physical device's queue family properties
         queue_family_count : u32 = 0
@@ -241,6 +253,12 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
                 pQueuePriorities = &queue_priority
             }
         }
+
+        // Device extensions
+        extensions: [dynamic]cstring
+        if window_support {
+            append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+        }
         
         // Create logical device
         create_info := vk.DeviceCreateInfo {
@@ -249,7 +267,8 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
             flags = nil,
             queueCreateInfoCount = queue_count,
             pQueueCreateInfos = raw_data(&queue_create_infos),
-            ppEnabledExtensionNames = nil,
+            enabledExtensionCount = u32(len(extensions)),
+            ppEnabledExtensionNames = raw_data(extensions),
             ppEnabledLayerNames = nil,
             pEnabledFeatures = nil
         }
@@ -352,8 +371,11 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
         instance = inst,
         physical_device = phys_device,
         device = device,
-
+        frames_in_flight = frames_in_flight,
         alloc_callbacks = allocation_callbacks,
+        gfx_queue_family = gfx_queue_family,
+        compute_queue_family = compute_queue_family,
+        transfer_queue_family = transfer_queue_family,
         gfx_queue = gfx_queue,
         compute_queue = compute_queue,
         transfer_queue = transfer_queue,
@@ -367,14 +389,53 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
 
     // Init Handle_Maps
     {
-        hm_init(&gd.semaphores)
-        hm_init(&gd.pipelines)
+        hm.init(&gd.semaphores)
+        hm.init(&gd.pipelines)
     }
 
     return gd
 }
 
-create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> Handle {
+init_sdl2_surface :: proc(vgd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
+    if !sdl2.Vulkan_CreateSurface(window, vgd.instance, &vgd.surface) do return false
+
+    width, height : i32 = 0, 0
+    sdl2.Vulkan_GetDrawableSize(window, &width, &height)
+
+    // @TODO: Allow more configurability of swapchain options
+    // particularly pertaining to presentation mode and image format
+    create_info := vk.SwapchainCreateInfoKHR {
+        sType = .SWAPCHAIN_CREATE_INFO_KHR,
+        pNext = nil,
+        flags = nil,
+        surface = vgd.surface,
+        minImageCount = vgd.frames_in_flight,
+        imageFormat = .B8G8R8A8_SRGB,
+        imageColorSpace = .SRGB_NONLINEAR,
+        imageExtent = vk.Extent2D {
+            width = u32(width),
+            height = u32(height)
+        },
+        imageArrayLayers = 1,
+        imageUsage = {.COLOR_ATTACHMENT},
+        imageSharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &vgd.gfx_queue_family,
+        preTransform = {.IDENTITY},
+        compositeAlpha = {.OPAQUE},
+        presentMode = .FIFO,
+        clipped = true,
+        oldSwapchain = 0
+    }
+    swapchain: vk.SwapchainKHR
+    if vk.CreateSwapchainKHR(vgd.device, &create_info, vgd.alloc_callbacks, &swapchain) != .SUCCESS {
+        return false
+    }
+
+    return true
+}
+
+create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> hm.Handle {
     t_info := vk.SemaphoreTypeCreateInfo {
         sType = .SEMAPHORE_TYPE_CREATE_INFO,
         pNext = nil,
@@ -390,11 +451,11 @@ create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> Handle 
     if vk.CreateSemaphore(gd.device, &s_info, gd.alloc_callbacks, &s) != .SUCCESS {
         log.error("Failed to create semaphore.")
     }
-    return hm_insert(&gd.semaphores, s)
+    return hm.insert(&gd.semaphores, s)
 }
 
-destroy_semaphore :: proc(gd: ^Graphics_Device, handle: Handle) -> bool {
-    semaphore := hm_get(&gd.semaphores, handle) or_return
+destroy_semaphore :: proc(gd: ^Graphics_Device, handle: hm.Handle) -> bool {
+    semaphore := hm.get(&gd.semaphores, handle) or_return
     vk.DestroySemaphore(gd.device, semaphore^, gd.alloc_callbacks)
     
     return true
