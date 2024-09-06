@@ -20,6 +20,13 @@ Semaphore_Info :: struct {
     init_value: u64,
 }
 
+Sync_Info :: struct {
+    wait_values: [dynamic]u64,
+    wait_semaphores: [dynamic]vk.Semaphore,
+    signal_values: [dynamic]u64,
+    signal_semaphores: [dynamic]vk.Semaphore,
+}
+
 Init_Parameters :: struct {
     // Vulkan instance creation parameters
     app_name: cstring,
@@ -36,6 +43,9 @@ Init_Parameters :: struct {
     window_support: bool        // Will this device need to draw to window surface swapchains?
 
 }
+
+// Distinct handle types for each Handle_Map in the Graphics_Device
+VkSemaphore_Handle :: distinct hm.Handle
 
 Graphics_Device :: struct {
     // Basic Vulkan objects that every app definitely needs
@@ -70,6 +80,7 @@ Graphics_Device :: struct {
     gfx_command_buffers: [dynamic]vk.CommandBuffer,
     compute_command_buffers: [dynamic]vk.CommandBuffer,
     transfer_command_buffers: [dynamic]vk.CommandBuffer,
+    next_gfx_command_buffer: u32,
 
     // Handle_Maps of all Vulkan objects
     semaphores: hm.Handle_Map(vk.Semaphore),
@@ -81,7 +92,7 @@ Graphics_Device :: struct {
 create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     assert(frames_in_flight > 0)
 
-    log.log(.Info, "vk init go!")
+    log.log(.Info, "Initializing Vulkan instance; device")
 
     vk.load_proc_addresses_global(sdl2.Vulkan_GetVkGetInstanceProcAddr())
 
@@ -184,7 +195,7 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
         }
 
         assert(phys_device != nil, "Didn't find vkPhysicalDevice")
-        fmt.printfln("%#v", features)
+        log.debugf("%#v", features)
 
         // Query the physical device's queue family properties
         queue_family_count : u32 = 0
@@ -198,7 +209,34 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
         }
         vk.GetPhysicalDeviceQueueFamilyProperties2(phys_device, &queue_family_count, raw_data(qfps))
 
-        // @TODO: Query for Sync2 support, we're making it mandatory, folks
+        //Load all supported device extensions for later querying
+        extension_count : u32 = 0
+        vk.EnumerateDeviceExtensionProperties(phys_device, nil, &extension_count, nil)
+
+        device_extensions: [dynamic]vk.ExtensionProperties
+        defer delete(device_extensions)
+        resize(&device_extensions, int(extension_count))
+        vk.EnumerateDeviceExtensionProperties(phys_device, nil, &extension_count, raw_data(device_extensions))
+
+        comp_bytes_to_string :: proc(bytes: []byte, s: string) -> bool {
+            return string(bytes[0:len(s)]) == s
+        }
+
+        // @TODO: Query for Sync2 support
+        if api_version == .Vulkan12 {
+            found_sync2 := false
+            for ext in device_extensions {
+                name := ext.extensionName
+                if comp_bytes_to_string(name[:], vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME) {
+                    found_sync2 = true
+                    log.debug("Sync2 verified")
+                    break
+                }
+            }
+            if !found_sync2 {
+                log.fatal("Your device does not support sync2. Buh bye.")
+            }
+        }
 
         // Determine available queue family types
         for qfp, i in qfps {
@@ -212,7 +250,7 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
             flags := qfp.queueFamilyProperties.queueFlags
             log.debugf("%#v", qfp.queueFamilyProperties.queueFlags)
             
-            if vk.QueueFlag.COMPUTE&vk.QueueFlag.TRANSFER in flags {
+            if .COMPUTE&.TRANSFER in flags {
                 compute_queue_family = u32(i)
                 transfer_queue_family = u32(i)
             }
@@ -256,8 +294,10 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
 
         // Device extensions
         extensions: [dynamic]cstring
+        defer delete(extensions)
         if window_support {
             append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+            append(&extensions, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
         }
         
         // Create logical device
@@ -435,7 +475,53 @@ init_sdl2_surface :: proc(vgd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
     return true
 }
 
-create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> hm.Handle {
+begin_gfx_command_buffer :: proc(gd: ^Graphics_Device) -> u32 {
+    cb_idx := gd.next_gfx_command_buffer
+    gd.next_gfx_command_buffer = (gd.next_gfx_command_buffer + 1) % gd.frames_in_flight
+
+    cb := gd.gfx_command_buffers[cb_idx]
+    info := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        pNext = nil,
+        flags = {.ONE_TIME_SUBMIT},
+        pInheritanceInfo = nil
+    }
+    if vk.BeginCommandBuffer(cb, &info) != .SUCCESS {
+        log.fatal("Unable to begin gfx command buffer.")
+    }
+
+    return cb_idx
+}
+
+submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: u32, sync: ^Sync_Info) {
+    cb := gd.gfx_command_buffers[cb_idx]
+    if vk.EndCommandBuffer(cb) != .SUCCESS {
+        log.fatal("Unable to end gfx command buffer")
+    }
+
+    cb_info := vk.CommandBufferSubmitInfoKHR {
+        sType = .COMMAND_BUFFER_SUBMIT_INFO_KHR,
+        pNext = nil,
+        commandBuffer = cb,
+        deviceMask = 0
+    }
+    info := vk.SubmitInfo2KHR {
+        sType = .SUBMIT_INFO_2_KHR,
+        pNext = nil,
+        flags = nil,
+        waitSemaphoreInfoCount = 0,
+        pWaitSemaphoreInfos = nil,
+        signalSemaphoreInfoCount = 0,
+        pSignalSemaphoreInfos = nil,
+        commandBufferInfoCount = 1,
+        pCommandBufferInfos = &cb_info
+    }
+    if vk.QueueSubmit2KHR(gd.gfx_queue, 1, &info, 0) != .SUCCESS {
+        log.fatal("Unable to submit gfx command buffer")
+    }
+}
+
+create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> VkSemaphore_Handle {
     t_info := vk.SemaphoreTypeCreateInfo {
         sType = .SEMAPHORE_TYPE_CREATE_INFO,
         pNext = nil,
@@ -451,11 +537,25 @@ create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> hm.Hand
     if vk.CreateSemaphore(gd.device, &s_info, gd.alloc_callbacks, &s) != .SUCCESS {
         log.error("Failed to create semaphore.")
     }
-    return hm.insert(&gd.semaphores, s)
+    return VkSemaphore_Handle(hm.insert(&gd.semaphores, s))
 }
 
-destroy_semaphore :: proc(gd: ^Graphics_Device, handle: hm.Handle) -> bool {
-    semaphore := hm.get(&gd.semaphores, handle) or_return
+check_timeline_semaphore :: proc(gd: ^Graphics_Device, handle: VkSemaphore_Handle) -> (val: u64, ok: bool) {
+    sem := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
+    v: u64
+    if vk.GetSemaphoreCounterValue(gd.device, sem^, &v) != .SUCCESS {
+        log.fatal("Failed to read value from timeline semaphore")
+        return 0, false
+    }
+    return v, true
+}
+
+get_semaphore :: proc(gd: ^Graphics_Device, handle: VkSemaphore_Handle) -> (^vk.Semaphore, bool) {
+    return hm.get(&gd.semaphores, hm.Handle(handle))
+}
+
+destroy_semaphore :: proc(gd: ^Graphics_Device, handle: VkSemaphore_Handle) -> bool {
+    semaphore := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
     vk.DestroySemaphore(gd.device, semaphore^, gd.alloc_callbacks)
     
     return true
