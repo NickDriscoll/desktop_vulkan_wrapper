@@ -505,14 +505,45 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: u32, sync: ^Sync
         commandBuffer = cb,
         deviceMask = 0
     }
+
+    // Make semaphore submit infos
+    wait_sem_count := len(sync.wait_semaphores)
+    signal_sem_count := len(sync.signal_semaphores)
+    wait_submit_infos: [dynamic]vk.SemaphoreSubmitInfoKHR
+    signal_submit_infos: [dynamic]vk.SemaphoreSubmitInfoKHR
+    defer delete(wait_submit_infos)
+    defer delete(signal_submit_infos)
+    resize(&wait_submit_infos, wait_sem_count)
+    resize(&signal_submit_infos, signal_sem_count)
+    for i := 0; i < wait_sem_count; i += 1 {
+        wait_submit_infos[i] = vk.SemaphoreSubmitInfoKHR {
+            sType = .SEMAPHORE_SUBMIT_INFO_KHR,
+            pNext = nil,
+            semaphore = sync.wait_semaphores[i],
+            value = sync.wait_values[i],
+            stageMask = nil,
+            deviceIndex = 0
+        }
+    }
+    for i := 0; i < signal_sem_count; i += 1 {
+        signal_submit_infos[i] = vk.SemaphoreSubmitInfoKHR {
+            sType = .SEMAPHORE_SUBMIT_INFO_KHR,
+            pNext = nil,
+            semaphore = sync.signal_semaphores[i],
+            value = sync.signal_values[i],
+            stageMask = nil,
+            deviceIndex = 0
+        }
+    }
+
     info := vk.SubmitInfo2KHR {
         sType = .SUBMIT_INFO_2_KHR,
         pNext = nil,
         flags = nil,
-        waitSemaphoreInfoCount = 0,
-        pWaitSemaphoreInfos = nil,
-        signalSemaphoreInfoCount = 0,
-        pSignalSemaphoreInfos = nil,
+        waitSemaphoreInfoCount = u32(len(wait_submit_infos)),
+        pWaitSemaphoreInfos = raw_data(wait_submit_infos),
+        signalSemaphoreInfoCount = u32(len(signal_submit_infos)),
+        pSignalSemaphoreInfos = raw_data(signal_submit_infos),
         commandBufferInfoCount = 1,
         pCommandBufferInfos = &cb_info
     }
