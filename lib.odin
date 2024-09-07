@@ -1,14 +1,20 @@
 package desktop_vulkan_wrapper
 
+import "core:container/queue"
 import "core:fmt"
 import "core:os"
 import "core:log"
+import win32 "core:sys/windows"
 import "vendor:sdl2"
 import vk "vendor:vulkan"
 
-import win32 "core:sys/windows"
-
+import "odin-vma/vma"
 import hm "handlemap"
+
+// Distinct handle types for each Handle_Map in the Graphics_Device
+Buffer_Handle :: distinct hm.Handle
+Image_Handle :: distinct hm.Handle
+VkSemaphore_Handle :: distinct hm.Handle
 
 API_Version :: enum {
     Vulkan12,
@@ -20,11 +26,90 @@ Semaphore_Info :: struct {
     init_value: u64,
 }
 
+Semaphore_Op :: struct {
+    semaphore: vk.Semaphore,
+    value: u64
+}
+
 Sync_Info :: struct {
-    wait_values: [dynamic]u64,
-    wait_semaphores: [dynamic]vk.Semaphore,
-    signal_values: [dynamic]u64,
-    signal_semaphores: [dynamic]vk.Semaphore,
+    wait_ops: [dynamic]Semaphore_Op,
+    signal_ops: [dynamic]Semaphore_Op,
+}
+
+Buffer :: struct {
+    buffer: vk.Buffer,
+    allocation: vma.Allocation,
+    alloc_info: vma.Allocation_Info
+}
+
+Buffer_Delete :: struct {
+    death_frame: u64,
+    buffer: vk.Buffer,
+    allocation: vma.Allocation
+}
+
+// struct BufferDeletion {
+// 	uint32_t idx;
+// 	uint32_t frames_til;
+// 	VkBuffer buffer;
+// 	VmaAllocation allocation;
+// };
+
+Image :: struct {
+    image: vk.Image,
+    image_view: vk.ImageView
+}
+
+CommandBuffer_Index :: distinct u32
+
+Graphics_Device :: struct {
+    // Basic Vulkan state that every app definitely needs
+    instance: vk.Instance,
+    physical_device: vk.PhysicalDevice,
+    device: vk.Device,
+    pipeline_cache: vk.PipelineCache,
+    alloc_callbacks: ^vk.AllocationCallbacks,
+    allocator: vma.Allocator,
+    //vma_alloc_callbacks: ^vma.Allcation_ca,
+    frames_in_flight: u32,
+    frame_count: u64,
+    
+    // Objects required to support windowing
+    // Basically every app will use these, but maybe
+    // these could be factored out
+    surface: vk.SurfaceKHR,
+    swapchain: vk.SwapchainKHR,
+    
+    
+    // The Vulkan queues that the device will submit on
+    // May be aliases of each other if e.g. the GPU doesn't have
+    // an async compute queue
+    gfx_queue_family: u32,
+    compute_queue_family: u32,
+    transfer_queue_family: u32,
+    gfx_queue: vk.Queue,
+    compute_queue: vk.Queue,
+    transfer_queue: vk.Queue,
+    
+    // Command buffer related state
+    gfx_command_pool: vk.CommandPool,
+    compute_command_pool: vk.CommandPool,
+    transfer_command_pool: vk.CommandPool,
+    gfx_command_buffers: [dynamic]vk.CommandBuffer,
+    compute_command_buffers: [dynamic]vk.CommandBuffer,
+    transfer_command_buffers: [dynamic]vk.CommandBuffer,
+    next_gfx_command_buffer: u32,
+    
+    // Handle_Maps of all Vulkan objects
+    buffers: hm.Handle_Map(Buffer),
+    images: hm.Handle_Map(Image),
+    semaphores: hm.Handle_Map(vk.Semaphore),
+    pipelines: hm.Handle_Map(vk.Pipeline),
+
+    // Deletion queues for Buffers and Images
+    buffer_deletes: queue.Queue(Buffer_Delete)
+    
+    
 }
 
 Init_Parameters :: struct {
@@ -44,76 +129,33 @@ Init_Parameters :: struct {
 
 }
 
-// Distinct handle types for each Handle_Map in the Graphics_Device
-VkSemaphore_Handle :: distinct hm.Handle
-
-Graphics_Device :: struct {
-    // Basic Vulkan objects that every app definitely needs
-    instance: vk.Instance,
-    physical_device: vk.PhysicalDevice,
-    device: vk.Device,
-    pipeline_cache: vk.PipelineCache,
-    alloc_callbacks: ^vk.AllocationCallbacks,
-
-    // Objects required to support windowing
-    // Basically every app will use these, but maybe
-    // these could be factored out
-    surface: vk.SurfaceKHR,
-    swapchain: vk.SwapchainKHR,
-
-    frames_in_flight: u32,
-    
-    // The Vulkan queues that the device will submit on
-    // May be aliases of each other if e.g. the GPU doesn't have
-    // an async compute queue
-    gfx_queue_family: u32,
-    compute_queue_family: u32,
-    transfer_queue_family: u32,
-    gfx_queue: vk.Queue,
-    compute_queue: vk.Queue,
-    transfer_queue: vk.Queue,
-
-    // Command buffer related state
-    gfx_command_pool: vk.CommandPool,
-    compute_command_pool: vk.CommandPool,
-    transfer_command_pool: vk.CommandPool,
-    gfx_command_buffers: [dynamic]vk.CommandBuffer,
-    compute_command_buffers: [dynamic]vk.CommandBuffer,
-    transfer_command_buffers: [dynamic]vk.CommandBuffer,
-    next_gfx_command_buffer: u32,
-
-    // Handle_Maps of all Vulkan objects
-    semaphores: hm.Handle_Map(vk.Semaphore),
-    pipelines: hm.Handle_Map(vk.Pipeline),
-
-
-}
-
-create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device {
+init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     assert(frames_in_flight > 0)
-
-    log.log(.Info, "Initializing Vulkan instance; device")
-
+    
+    log.log(.Info, "Initializing Vulkan instance and device")
+    
     vk.load_proc_addresses_global(sdl2.Vulkan_GetVkGetInstanceProcAddr())
-
+    
     // Create Vulkan instance
     // @TODO: Look into vkEnumerateInstanceVersion()
     inst: vk.Instance
+    api_version_int: u32
     {
-        api_version_int: u32
         switch api_version {
             case .Vulkan12:
+                log.info("Selected Vulkan 1.2")
                 api_version_int = vk.API_VERSION_1_2
             case .Vulkan13:
+                log.info("Selected Vulkan 1.3")
                 api_version_int = vk.API_VERSION_1_3
         }
-
-        extensions: [dynamic]cstring
-        defer delete(extensions)
+            
         
         // Instead of forcing the caller to explicitly provide
         // the extensions they want to enable, I want to provide high-level
         // idioms that cover many extensions in the same logical category
+        extensions: [dynamic]cstring
+        defer delete(extensions)
         if window_support {
             append(&extensions, vk.KHR_SURFACE_EXTENSION_NAME)
             when ODIN_OS == .Windows {
@@ -139,6 +181,7 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
             sType = .INSTANCE_CREATE_INFO,
             pNext = nil,
             flags = nil,
+            pApplicationInfo = &app_info,
             enabledLayerCount = 0,
             ppEnabledLayerNames = nil,
             enabledExtensionCount = u32(len(extensions)),
@@ -189,6 +232,7 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
                 has_right_features := true
                 if has_right_features {
                     phys_device = pd
+                    log.infof("Chosen GPU: %s", string(props.properties.deviceName[:]))
                     break
                 }
             }
@@ -222,19 +266,27 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
             return string(bytes[0:len(s)]) == s
         }
 
-        // @TODO: Query for Sync2 support
+        // Query for extension support,
+        // namely Sync2 and dynamic rendering support for now
         if api_version == .Vulkan12 {
             found_sync2 := false
+            found_dynamic_rendering := false
             for ext in device_extensions {
                 name := ext.extensionName
                 if comp_bytes_to_string(name[:], vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME) {
                     found_sync2 = true
-                    log.debug("Sync2 verified")
-                    break
+                    log.info("Sync2 verified")
+                }
+                if comp_bytes_to_string(name[:], vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME) {
+                    found_dynamic_rendering = true
+                    log.info("Dynamic rendering verified")
                 }
             }
             if !found_sync2 {
                 log.fatal("Your device does not support sync2. Buh bye.")
+            }
+            if !found_dynamic_rendering {
+                log.fatal("Your device does not support dynamic rendering. Buh bye.")
             }
         }
 
@@ -297,7 +349,10 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
         defer delete(extensions)
         if window_support {
             append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
-            append(&extensions, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
+            if api_version == .Vulkan12 {
+                append(&extensions, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
+                append(&extensions, vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
+            }
         }
         
         // Create logical device
@@ -320,6 +375,28 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
 
     //Load proc addrs that come from the device driver
     vk.load_proc_addresses_device(device)
+
+    // Initialize the Vulkan Memory Allocator
+    allocator: vma.Allocator
+    {
+        fns := vma.create_vulkan_functions()
+        info := vma.Allocator_Create_Info {
+            flags = {.Externally_Synchronized,.Buffer_Device_Address},
+            physical_device = phys_device,
+            device = device,
+            preferred_large_heap_block_size = 256 * 1024 * 1024,
+            allocation_callbacks = allocation_callbacks,
+            device_memory_callbacks = nil,
+            heap_size_limit = nil,
+            vulkan_functions = &fns,
+            instance = inst,
+            vulkan_api_version = api_version_int,
+            type_external_memory_handle_types = nil            
+        }
+        if vma.create_allocator(&info, &allocator) != .SUCCESS {
+            log.fatal("Failed to initialize VMA.")
+        }
+    }
 
     // Cache individual queues
     // We only use one queue from each family
@@ -413,6 +490,7 @@ create_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Devic
         device = device,
         frames_in_flight = frames_in_flight,
         alloc_callbacks = allocation_callbacks,
+        allocator = allocator,
         gfx_queue_family = gfx_queue_family,
         compute_queue_family = compute_queue_family,
         transfer_queue_family = transfer_queue_family,
@@ -467,15 +545,74 @@ init_sdl2_surface :: proc(vgd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
         clipped = true,
         oldSwapchain = 0
     }
-    swapchain: vk.SwapchainKHR
-    if vk.CreateSwapchainKHR(vgd.device, &create_info, vgd.alloc_callbacks, &swapchain) != .SUCCESS {
+    if vk.CreateSwapchainKHR(vgd.device, &create_info, vgd.alloc_callbacks, &vgd.swapchain) != .SUCCESS {
         return false
     }
 
     return true
 }
 
-begin_gfx_command_buffer :: proc(gd: ^Graphics_Device) -> u32 {
+Buffer_Info :: struct {
+    size: vk.DeviceSize,
+    usage: vk.BufferUsageFlags,
+    queue_family_index: u32,
+    required_flags: vk.MemoryPropertyFlags
+}
+
+create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Handle {
+    info := vk.BufferCreateInfo {
+        sType = .BUFFER_CREATE_INFO,
+        pNext = nil,
+        flags = nil,
+        size = buf_info.size,
+        usage = buf_info.usage,
+        sharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &buf_info.queue_family_index
+    }
+    alloc_info := vma.Allocation_Create_Info {
+        flags = nil,
+        usage = .Auto,
+        required_flags = buf_info.required_flags,
+        preferred_flags = nil,
+        priority = 1.0
+    }
+    b: Buffer
+    if vma.create_buffer(gd.allocator, &info, &alloc_info, &b.buffer, &b.allocation, &b.alloc_info) != .SUCCESS {
+        log.fatal("Failed to create buffer.")
+    }
+    return Buffer_Handle(hm.insert(&gd.buffers, b))
+}
+
+get_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> (^Buffer, bool) {
+    return hm.get(&gd.buffers, hm.Handle(handle))
+}
+
+delete_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> bool {
+    buffer := hm.get(&gd.buffers, hm.Handle(handle)) or_return
+
+    buffer_delete := Buffer_Delete {
+        death_frame = gd.frame_count + u64(gd.frames_in_flight),
+        buffer = buffer.buffer,
+        allocation = buffer.allocation
+    }
+    queue.append(&gd.buffer_deletes, buffer_delete)
+    hm.remove(&gd.buffers, hm.Handle(handle))
+
+    return true
+}
+
+tick_deletion_queues :: proc(gd: ^Graphics_Device) {
+    // Process buffer queue
+    for queue.len(gd.buffer_deletes) > 0 && queue.peek_front(&gd.buffer_deletes).death_frame == gd.frame_count {
+        buffer := queue.pop_front(&gd.buffer_deletes)
+        vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
+    }
+
+    // @TODO: Process image queue
+}
+
+begin_gfx_command_buffer :: proc(gd: ^Graphics_Device) -> CommandBuffer_Index {
     cb_idx := gd.next_gfx_command_buffer
     gd.next_gfx_command_buffer = (gd.next_gfx_command_buffer + 1) % gd.frames_in_flight
 
@@ -490,53 +627,49 @@ begin_gfx_command_buffer :: proc(gd: ^Graphics_Device) -> u32 {
         log.fatal("Unable to begin gfx command buffer.")
     }
 
-    return cb_idx
+    return CommandBuffer_Index(cb_idx)
 }
 
-submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: u32, sync: ^Sync_Info) {
+submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, sync: ^Sync_Info) {
     cb := gd.gfx_command_buffers[cb_idx]
     if vk.EndCommandBuffer(cb) != .SUCCESS {
         log.fatal("Unable to end gfx command buffer")
     }
 
-    cb_info := vk.CommandBufferSubmitInfoKHR {
+    cb_info := vk.CommandBufferSubmitInfo{
         sType = .COMMAND_BUFFER_SUBMIT_INFO_KHR,
         pNext = nil,
         commandBuffer = cb,
         deviceMask = 0
     }
 
+    build_submit_infos :: proc(
+        submit_infos: ^[dynamic]vk.SemaphoreSubmitInfoKHR,
+        semaphore_ops: ^[dynamic]Semaphore_Op
+    ) {
+        count := len(semaphore_ops)
+        resize(submit_infos, count)
+        for i := 0; i < count; i += 1 {
+            submit_infos[i] = vk.SemaphoreSubmitInfo{
+                sType = .SEMAPHORE_SUBMIT_INFO_KHR,
+                pNext = nil,
+                semaphore = semaphore_ops[i].semaphore,
+                value = semaphore_ops[i].value,
+                stageMask = nil,
+                deviceIndex = 0
+            }
+        }
+    }
+
     // Make semaphore submit infos
-    wait_sem_count := len(sync.wait_semaphores)
-    signal_sem_count := len(sync.signal_semaphores)
     wait_submit_infos: [dynamic]vk.SemaphoreSubmitInfoKHR
     signal_submit_infos: [dynamic]vk.SemaphoreSubmitInfoKHR
     defer delete(wait_submit_infos)
     defer delete(signal_submit_infos)
-    resize(&wait_submit_infos, wait_sem_count)
-    resize(&signal_submit_infos, signal_sem_count)
-    for i := 0; i < wait_sem_count; i += 1 {
-        wait_submit_infos[i] = vk.SemaphoreSubmitInfoKHR {
-            sType = .SEMAPHORE_SUBMIT_INFO_KHR,
-            pNext = nil,
-            semaphore = sync.wait_semaphores[i],
-            value = sync.wait_values[i],
-            stageMask = nil,
-            deviceIndex = 0
-        }
-    }
-    for i := 0; i < signal_sem_count; i += 1 {
-        signal_submit_infos[i] = vk.SemaphoreSubmitInfoKHR {
-            sType = .SEMAPHORE_SUBMIT_INFO_KHR,
-            pNext = nil,
-            semaphore = sync.signal_semaphores[i],
-            value = sync.signal_values[i],
-            stageMask = nil,
-            deviceIndex = 0
-        }
-    }
+    build_submit_infos(&wait_submit_infos, &sync.wait_ops)
+    build_submit_infos(&wait_submit_infos, &sync.signal_ops)
 
-    info := vk.SubmitInfo2KHR {
+    info := vk.SubmitInfo2{
         sType = .SUBMIT_INFO_2_KHR,
         pNext = nil,
         flags = nil,
@@ -550,6 +683,43 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: u32, sync: ^Sync
     if vk.QueueSubmit2KHR(gd.gfx_queue, 1, &info, 0) != .SUCCESS {
         log.fatal("Unable to submit gfx command buffer")
     }
+    gd.frame_count += 1
+}
+
+
+
+begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+    cb := gd.gfx_command_buffers[cb_idx]
+
+    color_attachment := vk.RenderingAttachmentInfo{
+        sType = .RENDERING_ATTACHMENT_INFO_KHR,
+        pNext = nil,
+        imageView = 0,
+        imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+        loadOp = .DONT_CARE,
+        storeOp = .STORE
+    }
+
+    info := vk.RenderingInfo{
+        sType = .RENDERING_INFO_KHR,
+        pNext = nil,
+        flags = nil,
+        renderArea = vk.Rect2D {
+
+        },
+        layerCount = 1,
+        viewMask = 0,
+        colorAttachmentCount = 1,
+        pColorAttachments = &color_attachment,
+        pDepthAttachment = nil,
+        pStencilAttachment = nil
+    }
+    vk.CmdBeginRenderingKHR(cb, &info)
+}
+
+end_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+    cb := gd.gfx_command_buffers[cb_idx]
+    vk.CmdEndRenderingKHR(cb)
 }
 
 create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> VkSemaphore_Handle {

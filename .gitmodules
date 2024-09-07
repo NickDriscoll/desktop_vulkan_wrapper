@@ -1,0 +1,3 @@
+[submodule "odin-vma"]
+	path = odin-vma
+	url = git@github.com:Capati/odin-vma.git
