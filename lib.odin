@@ -21,6 +21,12 @@ API_Version :: enum {
     Vulkan13
 }
 
+Queue_Family :: enum {
+    Graphics,
+    Compute,
+    Transfer
+}
+
 Semaphore_Info :: struct {
     type: vk.SemaphoreType,
     init_value: u64,
@@ -555,11 +561,18 @@ init_sdl2_surface :: proc(vgd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
 Buffer_Info :: struct {
     size: vk.DeviceSize,
     usage: vk.BufferUsageFlags,
-    queue_family_index: u32,
+    queue_family: Queue_Family,
     required_flags: vk.MemoryPropertyFlags
 }
 
 create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Handle {
+    queue_family_index: u32
+    switch buf_info.queue_family {
+        case .Graphics: queue_family_index = gd.gfx_queue_family
+        case .Compute: queue_family_index = gd.compute_queue_family
+        case .Transfer: queue_family_index = gd.transfer_queue_family
+    }
+
     info := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
         pNext = nil,
@@ -568,7 +581,7 @@ create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Ha
         usage = buf_info.usage,
         sharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
-        pQueueFamilyIndices = &buf_info.queue_family_index
+        pQueueFamilyIndices = &queue_family_index
     }
     alloc_info := vma.Allocation_Create_Info {
         flags = nil,
