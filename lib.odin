@@ -11,10 +11,21 @@ import vk "vendor:vulkan"
 import "odin-vma/vma"
 import hm "handlemap"
 
+IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
+    r = .R,
+    g = .G,
+    b = .B,
+    a = .A,
+}
+
 // Distinct handle types for each Handle_Map in the Graphics_Device
 Buffer_Handle :: distinct hm.Handle
 Image_Handle :: distinct hm.Handle
 Semaphore_Handle :: distinct hm.Handle
+
+float2 :: distinct [2]f32
+int2 :: distinct [2]i32
+uint2 :: distinct [2]u32
 
 API_Version :: enum {
     Vulkan12,
@@ -68,7 +79,8 @@ Buffer_Delete :: struct {
 
 Image :: struct {
     image: vk.Image,
-    image_view: vk.ImageView
+    image_view: vk.ImageView,
+    allocation: vma.Allocation
 }
 
 CommandBuffer_Index :: distinct u32
@@ -90,6 +102,7 @@ Graphics_Device :: struct {
     // these could be factored out
     surface: vk.SurfaceKHR,
     swapchain: vk.SwapchainKHR,
+    swapchain_images: [dynamic]Image_Handle,
     
     
     // The Vulkan queues that the device will submit on
@@ -237,15 +250,18 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
             // @TODO: Do something more sophisticated than picking the first DISCRETE_GPU
             if props.properties.deviceType == .DISCRETE_GPU {
                 // Check physical device features
+                dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures
                 timeline_features: vk.PhysicalDeviceTimelineSemaphoreFeatures
                 sync2_features: vk.PhysicalDeviceSynchronization2Features
                 bda_features: vk.PhysicalDeviceBufferDeviceAddressFeatures
 
+                dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
                 timeline_features.sType = .PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES
                 sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
                 bda_features.sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
                 features.sType = .PHYSICAL_DEVICE_FEATURES_2
 
+                timeline_features.pNext = &dynamic_rendering_features
                 sync2_features.pNext = &timeline_features
                 bda_features.pNext = &sync2_features
                 features.pNext = &bda_features
@@ -301,15 +317,15 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
                 name := ext.extensionName
                 if comp_bytes_to_string(name[:], vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME) {
                     found_sync2 = true
-                    log.info("Sync2 verified")
+                    log.infof("%s verified", name)
                 }
                 if comp_bytes_to_string(name[:], vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME) {
                     found_dynamic_rendering = true
-                    log.info("Dynamic rendering verified")
+                    log.infof("%s verified", name)
                 }
                 if comp_bytes_to_string(name[:], vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) {
                     found_bda = true
-                    log.info("BufferDeviceAddress verified")
+                    log.infof("%s verified", name)
                 }
             }
             if !found_sync2 {
@@ -556,21 +572,22 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
     return gd
 }
 
-init_sdl2_surface :: proc(vgd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
-    if !sdl2.Vulkan_CreateSurface(window, vgd.instance, &vgd.surface) do return false
+init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
+    if !sdl2.Vulkan_CreateSurface(window, gd.instance, &gd.surface) do return false
 
     width, height : i32 = 0, 0
     sdl2.Vulkan_GetDrawableSize(window, &width, &height)
 
     // @TODO: Allow more configurability of swapchain options
     // particularly pertaining to presentation mode and image format
+    image_format := vk.Format.B8G8R8A8_SRGB
     create_info := vk.SwapchainCreateInfoKHR {
         sType = .SWAPCHAIN_CREATE_INFO_KHR,
         pNext = nil,
         flags = nil,
-        surface = vgd.surface,
-        minImageCount = vgd.frames_in_flight,
-        imageFormat = .B8G8R8A8_SRGB,
+        surface = gd.surface,
+        minImageCount = gd.frames_in_flight,
+        imageFormat = image_format,
         imageColorSpace = .SRGB_NONLINEAR,
         imageExtent = vk.Extent2D {
             width = u32(width),
@@ -580,15 +597,60 @@ init_sdl2_surface :: proc(vgd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
         imageUsage = {.COLOR_ATTACHMENT},
         imageSharingMode = .EXCLUSIVE,
         queueFamilyIndexCount = 1,
-        pQueueFamilyIndices = &vgd.gfx_queue_family,
+        pQueueFamilyIndices = &gd.gfx_queue_family,
         preTransform = {.IDENTITY},
         compositeAlpha = {.OPAQUE},
         presentMode = .FIFO,
         clipped = true,
         oldSwapchain = 0
     }
-    if vk.CreateSwapchainKHR(vgd.device, &create_info, vgd.alloc_callbacks, &vgd.swapchain) != .SUCCESS {
+    if vk.CreateSwapchainKHR(gd.device, &create_info, gd.alloc_callbacks, &gd.swapchain) != .SUCCESS {
         return false
+    }
+
+    // Get swapchain images
+    image_count : u32 = 0
+    swapchain_images: [dynamic]vk.Image
+    {
+        vk.GetSwapchainImagesKHR(gd.device, gd.swapchain, &image_count, nil)
+        resize(&swapchain_images, image_count)
+        vk.GetSwapchainImagesKHR(gd.device, gd.swapchain, &image_count, raw_data(swapchain_images))
+    }
+    
+    swapchain_image_views: [dynamic]vk.ImageView
+    resize(&swapchain_image_views, image_count)
+    // Create image views for the swapchain images for rendering
+    {
+        for vkimage, i in swapchain_images {
+            info := vk.ImageViewCreateInfo {
+                sType = .IMAGE_VIEW_CREATE_INFO,
+                pNext = nil,
+                flags = nil,
+                image = vkimage,
+                viewType = .D2,
+                format = image_format,
+                components = IDENTITY_COMPONENT_SWIZZLE,
+                subresourceRange = {
+                    aspectMask = {.COLOR},
+                    baseMipLevel = 0,
+                    levelCount = 1,
+                    baseArrayLayer = 0,
+                    layerCount = 1
+                }
+            }
+            vk.CreateImageView(gd.device, &info, gd.alloc_callbacks, &swapchain_image_views[i])
+        }
+    }
+
+    {
+        resize(&gd.swapchain_images, image_count)
+        for i : u32 = 0; i < image_count; i += 1 {
+            im := Image {
+                image = swapchain_images[i],
+                image_view = swapchain_image_views[i]
+            }
+            gd.swapchain_images[i] = Image_Handle(hm.insert(&gd.images, im))
+        }
     }
 
     return true
@@ -756,15 +818,20 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
     gd.frame_count += 1
 }
 
+Framebuffer :: struct {
+    color_image_views: [8]Image_Handle,
+    depth_image_view: Image_Handle,
+    resolution: uint2
+}
 
-
-begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
     cb := gd.gfx_command_buffers[cb_idx]
 
+    iv, ok := hm.get(&gd.images, hm.Handle(framebuffer.color_image_views[0]))
     color_attachment := vk.RenderingAttachmentInfo{
         sType = .RENDERING_ATTACHMENT_INFO_KHR,
         pNext = nil,
-        imageView = 0,
+        imageView = iv.image_view,
         imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
         loadOp = .DONT_CARE,
         storeOp = .STORE
@@ -775,7 +842,10 @@ begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
         pNext = nil,
         flags = nil,
         renderArea = vk.Rect2D {
-
+            extent = vk.Extent2D {
+                width = framebuffer.resolution.x,
+                height = framebuffer.resolution.y
+            }
         },
         layerCount = 1,
         viewMask = 0,
