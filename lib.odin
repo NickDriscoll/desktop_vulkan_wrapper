@@ -14,7 +14,7 @@ import hm "handlemap"
 // Distinct handle types for each Handle_Map in the Graphics_Device
 Buffer_Handle :: distinct hm.Handle
 Image_Handle :: distinct hm.Handle
-VkSemaphore_Handle :: distinct hm.Handle
+Semaphore_Handle :: distinct hm.Handle
 
 API_Version :: enum {
     Vulkan12,
@@ -33,13 +33,18 @@ Semaphore_Info :: struct {
 }
 
 Semaphore_Op :: struct {
-    semaphore: vk.Semaphore,
+    semaphore: Semaphore_Handle,
     value: u64
 }
 
 Sync_Info :: struct {
     wait_ops: [dynamic]Semaphore_Op,
     signal_ops: [dynamic]Semaphore_Op,
+}
+
+delete_sync_info :: proc(s: ^Sync_Info) {
+    delete(s.wait_ops)
+    delete(s.signal_ops)
 }
 
 Buffer :: struct {
@@ -232,10 +237,24 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
             // @TODO: Do something more sophisticated than picking the first DISCRETE_GPU
             if props.properties.deviceType == .DISCRETE_GPU {
                 // Check physical device features
+                timeline_features: vk.PhysicalDeviceTimelineSemaphoreFeatures
+                sync2_features: vk.PhysicalDeviceSynchronization2Features
+                bda_features: vk.PhysicalDeviceBufferDeviceAddressFeatures
+
+                timeline_features.sType = .PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES
+                sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
+                bda_features.sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
                 features.sType = .PHYSICAL_DEVICE_FEATURES_2
+
+                sync2_features.pNext = &timeline_features
+                bda_features.pNext = &sync2_features
+                features.pNext = &bda_features
                 vk.GetPhysicalDeviceFeatures2(pd, &features)
 
-                has_right_features := true
+                has_right_features := 
+                    bda_features.bufferDeviceAddress && 
+                    sync2_features.synchronization2 &&
+                    timeline_features.timelineSemaphore
                 if has_right_features {
                     phys_device = pd
                     log.infof("Chosen GPU: %s", string(props.properties.deviceName[:]))
@@ -277,6 +296,7 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
         if api_version == .Vulkan12 {
             found_sync2 := false
             found_dynamic_rendering := false
+            found_bda := false
             for ext in device_extensions {
                 name := ext.extensionName
                 if comp_bytes_to_string(name[:], vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME) {
@@ -287,12 +307,19 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
                     found_dynamic_rendering = true
                     log.info("Dynamic rendering verified")
                 }
+                if comp_bytes_to_string(name[:], vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) {
+                    found_bda = true
+                    log.info("BufferDeviceAddress verified")
+                }
             }
             if !found_sync2 {
                 log.fatal("Your device does not support sync2. Buh bye.")
             }
             if !found_dynamic_rendering {
                 log.fatal("Your device does not support dynamic rendering. Buh bye.")
+            }
+            if !found_bda {
+                log.fatal("Your device does not support BufferDeviceAddress. Buh bye.")
             }
         }
 
@@ -358,6 +385,7 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
             if api_version == .Vulkan12 {
                 append(&extensions, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
                 append(&extensions, vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
+                append(&extensions, vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
             }
         }
         
@@ -385,12 +413,20 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
     // Initialize the Vulkan Memory Allocator
     allocator: vma.Allocator
     {
+        // We have to redefine these function aliases in order to
+        // ensure VMA is able to find all the functions
+        vk.GetBufferMemoryRequirements2KHR = vk.GetBufferMemoryRequirements2
+        vk.GetImageMemoryRequirements2KHR = vk.GetImageMemoryRequirements2
+        vk.BindBufferMemory2KHR = vk.BindBufferMemory2
+        vk.BindImageMemory2KHR = vk.BindImageMemory2
+        vk.GetPhysicalDeviceMemoryProperties2KHR = vk.GetPhysicalDeviceMemoryProperties2
         fns := vma.create_vulkan_functions()
+
         info := vma.Allocator_Create_Info {
             flags = {.Externally_Synchronized,.Buffer_Device_Address},
             physical_device = phys_device,
             device = device,
-            preferred_large_heap_block_size = 256 * 1024 * 1024,
+            preferred_large_heap_block_size = 0,
             allocation_callbacks = allocation_callbacks,
             device_memory_callbacks = nil,
             heap_size_limit = nil,
@@ -619,15 +655,33 @@ tick_deletion_queues :: proc(gd: ^Graphics_Device) {
     // Process buffer queue
     for queue.len(gd.buffer_deletes) > 0 && queue.peek_front(&gd.buffer_deletes).death_frame == gd.frame_count {
         buffer := queue.pop_front(&gd.buffer_deletes)
+        log.debugf("Destroying buffer %s...", buffer.buffer)
         vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
     }
 
     // @TODO: Process image queue
 }
 
-begin_gfx_command_buffer :: proc(gd: ^Graphics_Device) -> CommandBuffer_Index {
+begin_gfx_command_buffer :: proc(gd: ^Graphics_Device, cpu_wait: ^Semaphore_Op) -> CommandBuffer_Index {
     cb_idx := gd.next_gfx_command_buffer
     gd.next_gfx_command_buffer = (gd.next_gfx_command_buffer + 1) % gd.frames_in_flight
+
+    if cpu_wait.value > 0 {
+        sem, ok := hm.get(&gd.semaphores, hm.Handle(cpu_wait.semaphore))
+        if !ok do log.fatal("Couldn't find semaphore for CPU-sync")
+
+        info := vk.SemaphoreWaitInfo {
+            sType = .SEMAPHORE_WAIT_INFO,
+            pNext = nil,
+            flags = nil,
+            semaphoreCount = 1,
+            pSemaphores = sem,
+            pValues = &cpu_wait.value
+        }
+        if vk.WaitSemaphores(gd.device, &info, 0xFFFF_FFFF_FFFF_FFFF) != .SUCCESS {
+            log.fatal("Failed to wait for timeline semaphore CPU-side man what")
+        }
+    }
 
     cb := gd.gfx_command_buffers[cb_idx]
     info := vk.CommandBufferBeginInfo {
@@ -657,21 +711,24 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
     }
 
     build_submit_infos :: proc(
+        gd: ^Graphics_Device,
         submit_infos: ^[dynamic]vk.SemaphoreSubmitInfoKHR,
         semaphore_ops: ^[dynamic]Semaphore_Op
-    ) {
+    ) -> bool {
         count := len(semaphore_ops)
         resize(submit_infos, count)
         for i := 0; i < count; i += 1 {
+            sem := hm.get(&gd.semaphores, hm.Handle(semaphore_ops[i].semaphore)) or_return
             submit_infos[i] = vk.SemaphoreSubmitInfo{
                 sType = .SEMAPHORE_SUBMIT_INFO_KHR,
                 pNext = nil,
-                semaphore = semaphore_ops[i].semaphore,
+                semaphore = sem^,
                 value = semaphore_ops[i].value,
                 stageMask = nil,
                 deviceIndex = 0
             }
         }
+        return true
     }
 
     // Make semaphore submit infos
@@ -679,8 +736,8 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
     signal_submit_infos: [dynamic]vk.SemaphoreSubmitInfoKHR
     defer delete(wait_submit_infos)
     defer delete(signal_submit_infos)
-    build_submit_infos(&wait_submit_infos, &sync.wait_ops)
-    build_submit_infos(&wait_submit_infos, &sync.signal_ops)
+    build_submit_infos(gd, &wait_submit_infos, &sync.wait_ops)
+    build_submit_infos(gd, &signal_submit_infos, &sync.signal_ops)
 
     info := vk.SubmitInfo2{
         sType = .SUBMIT_INFO_2_KHR,
@@ -735,7 +792,7 @@ end_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
     vk.CmdEndRenderingKHR(cb)
 }
 
-create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> VkSemaphore_Handle {
+create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> Semaphore_Handle {
     t_info := vk.SemaphoreTypeCreateInfo {
         sType = .SEMAPHORE_TYPE_CREATE_INFO,
         pNext = nil,
@@ -751,10 +808,10 @@ create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> VkSemap
     if vk.CreateSemaphore(gd.device, &s_info, gd.alloc_callbacks, &s) != .SUCCESS {
         log.error("Failed to create semaphore.")
     }
-    return VkSemaphore_Handle(hm.insert(&gd.semaphores, s))
+    return Semaphore_Handle(hm.insert(&gd.semaphores, s))
 }
 
-check_timeline_semaphore :: proc(gd: ^Graphics_Device, handle: VkSemaphore_Handle) -> (val: u64, ok: bool) {
+check_timeline_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> (val: u64, ok: bool) {
     sem := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
     v: u64
     if vk.GetSemaphoreCounterValue(gd.device, sem^, &v) != .SUCCESS {
@@ -764,11 +821,11 @@ check_timeline_semaphore :: proc(gd: ^Graphics_Device, handle: VkSemaphore_Handl
     return v, true
 }
 
-get_semaphore :: proc(gd: ^Graphics_Device, handle: VkSemaphore_Handle) -> (^vk.Semaphore, bool) {
+get_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> (^vk.Semaphore, bool) {
     return hm.get(&gd.semaphores, hm.Handle(handle))
 }
 
-destroy_semaphore :: proc(gd: ^Graphics_Device, handle: VkSemaphore_Handle) -> bool {
+destroy_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> bool {
     semaphore := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
     vk.DestroySemaphore(gd.device, semaphore^, gd.alloc_callbacks)
     
