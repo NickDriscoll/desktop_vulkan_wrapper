@@ -4,6 +4,7 @@ import "core:container/queue"
 import "core:fmt"
 import "core:os"
 import "core:log"
+import "core:math"
 import win32 "core:sys/windows"
 import "vendor:sdl2"
 import vk "vendor:vulkan"
@@ -17,6 +18,8 @@ IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
     b = .B,
     a = .A,
 }
+
+U64_MAX :: 0xFFFF_FFFF_FFFF_FFFF
 
 // Distinct handle types for each Handle_Map in the Graphics_Device
 Buffer_Handle :: distinct hm.Handle
@@ -103,6 +106,8 @@ Graphics_Device :: struct {
     surface: vk.SurfaceKHR,
     swapchain: vk.SwapchainKHR,
     swapchain_images: [dynamic]Image_Handle,
+    acquire_semaphores: [dynamic]Semaphore_Handle,
+    present_semaphores: [dynamic]Semaphore_Handle,
     
     
     // The Vulkan queues that the device will submit on
@@ -643,17 +648,30 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
     }
 
     {
+        gd := gd
         resize(&gd.swapchain_images, image_count)
+        resize(&gd.acquire_semaphores, image_count)
+        resize(&gd.present_semaphores, image_count)
         for i : u32 = 0; i < image_count; i += 1 {
             im := Image {
                 image = swapchain_images[i],
                 image_view = swapchain_image_views[i]
             }
             gd.swapchain_images[i] = Image_Handle(hm.insert(&gd.images, im))
+
+            info := Semaphore_Info {
+                type = .BINARY
+            }
+            gd.acquire_semaphores[i] = create_semaphore(gd, &info)
+            gd.present_semaphores[i] = create_semaphore(gd, &info)
         }
     }
 
     return true
+}
+
+in_flight_idx :: proc(gd: ^Graphics_Device) -> u64 {
+    return gd.frame_count % u64(gd.frames_in_flight)
 }
 
 Buffer_Info :: struct {
@@ -724,6 +742,38 @@ tick_deletion_queues :: proc(gd: ^Graphics_Device) {
     // @TODO: Process image queue
 }
 
+acquire_swapchain_image :: proc(gd: ^Graphics_Device, out_image_idx: ^u32) -> bool {
+    idx := in_flight_idx(gd)
+    sem := get_semaphore(gd, gd.acquire_semaphores[idx]) or_return
+    
+    if vk.AcquireNextImageKHR(gd.device, gd.swapchain, U64_MAX, sem^, 0, out_image_idx) != .SUCCESS {
+        log.fatal("Failed to acquire swapchain image")
+        return false
+    }
+    return true
+}
+
+present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: u32) -> bool {
+    image_idx := image_idx
+    idx := in_flight_idx(gd)
+    sem := get_semaphore(gd, gd.present_semaphores[idx]) or_return
+    info := vk.PresentInfoKHR {
+        sType = .PRESENT_INFO_KHR,
+        pNext = nil,
+        waitSemaphoreCount = 1,
+        pWaitSemaphores = sem,
+        swapchainCount = 1,
+        pSwapchains = &gd.swapchain,
+        pImageIndices = &image_idx,
+        pResults = nil
+    }
+    if vk.QueuePresentKHR(gd.gfx_queue, &info) != .SUCCESS {
+        log.fatal("Failed to present swapchain image.")
+        return false
+    }
+    return true
+}
+
 begin_gfx_command_buffer :: proc(gd: ^Graphics_Device, cpu_wait: ^Semaphore_Op) -> CommandBuffer_Index {
     cb_idx := gd.next_gfx_command_buffer
     gd.next_gfx_command_buffer = (gd.next_gfx_command_buffer + 1) % gd.frames_in_flight
@@ -740,7 +790,7 @@ begin_gfx_command_buffer :: proc(gd: ^Graphics_Device, cpu_wait: ^Semaphore_Op) 
             pSemaphores = sem,
             pValues = &cpu_wait.value
         }
-        if vk.WaitSemaphores(gd.device, &info, 0xFFFF_FFFF_FFFF_FFFF) != .SUCCESS {
+        if vk.WaitSemaphores(gd.device, &info, U64_MAX) != .SUCCESS {
             log.fatal("Failed to wait for timeline semaphore CPU-side man what")
         }
     }
@@ -815,7 +865,6 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
     if vk.QueueSubmit2KHR(gd.gfx_queue, 1, &info, 0) != .SUCCESS {
         log.fatal("Unable to submit gfx command buffer")
     }
-    gd.frame_count += 1
 }
 
 Framebuffer :: struct {
@@ -826,6 +875,7 @@ Framebuffer :: struct {
 
 begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
     cb := gd.gfx_command_buffers[cb_idx]
+    t := f32(gd.frame_count) / 144.0
 
     iv, ok := hm.get(&gd.images, hm.Handle(framebuffer.color_image_views[0]))
     color_attachment := vk.RenderingAttachmentInfo{
@@ -833,8 +883,15 @@ begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, fra
         pNext = nil,
         imageView = iv.image_view,
         imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
-        loadOp = .DONT_CARE,
-        storeOp = .STORE
+        //loadOp = .DONT_CARE,
+        loadOp = .CLEAR,
+        storeOp = .STORE,
+        clearValue = vk.ClearValue {
+            color = vk.ClearColorValue {
+                //float32 = {1.0, 0.0, 1.0, 1.0}
+                float32 = {0.5*math.cos(t)+0.5, 0.0, 0.5*math.sin(t)+0.5, 1.0}
+            }
+        }
     }
 
     info := vk.RenderingInfo{
@@ -900,4 +957,16 @@ destroy_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> boo
     vk.DestroySemaphore(gd.device, semaphore^, gd.alloc_callbacks)
     
     return true
+}
+
+pipeline_barrier :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+    cb := gd.gfx_command_buffers[cb_idx]
+
+    info := vk.DependencyInfo {
+        sType = .DEPENDENCY_INFO,
+        pNext = nil,
+        dependencyFlags = nil,
+        
+    }
+    vk.CmdPipelineBarrier2(cb, &info)
 }
