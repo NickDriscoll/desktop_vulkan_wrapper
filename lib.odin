@@ -19,14 +19,14 @@ IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
     a = .A,
 }
 
-U64_MAX :: 0xFFFF_FFFF_FFFF_FFFF
-
 // Distinct handle types for each Handle_Map in the Graphics_Device
 Buffer_Handle :: distinct hm.Handle
 Image_Handle :: distinct hm.Handle
 Semaphore_Handle :: distinct hm.Handle
 
 float2 :: distinct [2]f32
+float3 :: distinct [3]f32
+float4 :: distinct [4]f32
 int2 :: distinct [2]i32
 uint2 :: distinct [2]u32
 
@@ -73,21 +73,13 @@ Buffer_Delete :: struct {
     allocation: vma.Allocation
 }
 
-// struct BufferDeletion {
-// 	uint32_t idx;
-// 	uint32_t frames_til;
-// 	VkBuffer buffer;
-// 	VmaAllocation allocation;
-// };
-
 Image :: struct {
     image: vk.Image,
     image_view: vk.ImageView,
     allocation: vma.Allocation
 }
 
-CommandBuffer_Index :: distinct u32
-
+// Megastruct holding basically all Vulkan-specific state
 Graphics_Device :: struct {
     // Basic Vulkan state that every app definitely needs
     instance: vk.Instance,
@@ -746,7 +738,7 @@ acquire_swapchain_image :: proc(gd: ^Graphics_Device, out_image_idx: ^u32) -> bo
     idx := in_flight_idx(gd)
     sem := get_semaphore(gd, gd.acquire_semaphores[idx]) or_return
     
-    if vk.AcquireNextImageKHR(gd.device, gd.swapchain, U64_MAX, sem^, 0, out_image_idx) != .SUCCESS {
+    if vk.AcquireNextImageKHR(gd.device, gd.swapchain, max(u64), sem^, 0, out_image_idx) != .SUCCESS {
         log.fatal("Failed to acquire swapchain image")
         return false
     }
@@ -774,6 +766,9 @@ present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: u32) -> bool {
     return true
 }
 
+
+CommandBuffer_Index :: distinct u32
+
 begin_gfx_command_buffer :: proc(gd: ^Graphics_Device, cpu_wait: ^Semaphore_Op) -> CommandBuffer_Index {
     cb_idx := gd.next_gfx_command_buffer
     gd.next_gfx_command_buffer = (gd.next_gfx_command_buffer + 1) % gd.frames_in_flight
@@ -790,7 +785,7 @@ begin_gfx_command_buffer :: proc(gd: ^Graphics_Device, cpu_wait: ^Semaphore_Op) 
             pSemaphores = sem,
             pValues = &cpu_wait.value
         }
-        if vk.WaitSemaphores(gd.device, &info, U64_MAX) != .SUCCESS {
+        if vk.WaitSemaphores(gd.device, &info, max(u64)) != .SUCCESS {
             log.fatal("Failed to wait for timeline semaphore CPU-side man what")
         }
     }
@@ -870,10 +865,12 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
 Framebuffer :: struct {
     color_image_views: [8]Image_Handle,
     depth_image_view: Image_Handle,
-    resolution: uint2
+    resolution: uint2,
+    clear_color: float4,
+
 }
 
-begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
+cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
     cb := gd.gfx_command_buffers[cb_idx]
     t := f32(gd.frame_count) / 144.0
 
@@ -914,7 +911,7 @@ begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, fra
     vk.CmdBeginRenderingKHR(cb, &info)
 }
 
-end_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+cmd_end_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
     cb := gd.gfx_command_buffers[cb_idx]
     vk.CmdEndRenderingKHR(cb)
 }
@@ -959,14 +956,66 @@ destroy_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> boo
     return true
 }
 
-pipeline_barrier :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+// Defines a memory dependency on exactly
+// one subresource range of a vk.Image (VkImage)
+Image_Barrier :: struct {
+    src_stage_mask: vk.PipelineStageFlags2,
+    src_access_mask: vk.AccessFlags2,
+    dst_stage_mask: vk.PipelineStageFlags2,
+    dst_access_mask: vk.AccessFlags2,
+    old_layout: vk.ImageLayout,
+    new_layout: vk.ImageLayout,
+    src_queue_family: u32,
+    dst_queue_family: u32,
+    image_handle: Image_Handle,
+    subresource_range: vk.ImageSubresourceRange
+}
+
+// Inserts an arbitrary number of memory barriers
+// into the command buffer at this point
+cmd_pipeline_barrier :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    image_barriers: []Image_Barrier
+) {
     cb := gd.gfx_command_buffers[cb_idx]
+
+    im_barriers: [dynamic]vk.ImageMemoryBarrier2
+    defer delete(im_barriers)
+    reserve(&im_barriers, len(image_barriers))
+    for barrier in image_barriers {
+        using barrier
+
+        im := hm.get(&gd.images, hm.Handle(image_handle)) or_continue   // @TODO: Should this really be or_continue?
+        append(
+            &im_barriers,
+            vk.ImageMemoryBarrier2 {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                pNext = nil,
+                srcStageMask = src_stage_mask,
+                srcAccessMask = src_access_mask,
+                dstStageMask = dst_stage_mask,
+                dstAccessMask = dst_access_mask,
+                oldLayout = old_layout,
+                newLayout = new_layout,
+                srcQueueFamilyIndex = src_queue_family,
+                dstQueueFamilyIndex = dst_queue_family,
+                image = im.image,
+                subresourceRange = subresource_range
+            }
+        )
+    }
 
     info := vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
         pNext = nil,
         dependencyFlags = nil,
-        
+        memoryBarrierCount = 0,
+        pMemoryBarriers = nil,
+        bufferMemoryBarrierCount = 0,
+        pBufferMemoryBarriers = nil,
+        imageMemoryBarrierCount = u32(len(im_barriers)),
+        pImageMemoryBarriers = raw_data(im_barriers)
     }
-    vk.CmdPipelineBarrier2(cb, &info)
+    vk.CmdPipelineBarrier2KHR(cb, &info)
 }
