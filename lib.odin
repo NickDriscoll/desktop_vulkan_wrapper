@@ -831,7 +831,7 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
                 pNext = nil,
                 semaphore = sem^,
                 value = semaphore_ops[i].value,
-                stageMask = nil,
+                stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
                 deviceIndex = 0
             }
         }
