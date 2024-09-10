@@ -24,11 +24,11 @@ Buffer_Handle :: distinct hm.Handle
 Image_Handle :: distinct hm.Handle
 Semaphore_Handle :: distinct hm.Handle
 
-float2 :: distinct [2]f32
-float3 :: distinct [3]f32
-float4 :: distinct [4]f32
-int2 :: distinct [2]i32
-uint2 :: distinct [2]u32
+float2 :: [2]f32
+float3 :: [3]f32
+float4 :: [4]f32
+int2 :: [2]i32
+uint2 :: [2]u32
 
 API_Version :: enum {
     Vulkan12,
@@ -867,12 +867,10 @@ Framebuffer :: struct {
     depth_image_view: Image_Handle,
     resolution: uint2,
     clear_color: float4,
-
 }
 
 cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
     cb := gd.gfx_command_buffers[cb_idx]
-    t := f32(gd.frame_count) / 144.0
 
     iv, ok := hm.get(&gd.images, hm.Handle(framebuffer.color_image_views[0]))
     color_attachment := vk.RenderingAttachmentInfo{
@@ -885,8 +883,7 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
         storeOp = .STORE,
         clearValue = vk.ClearValue {
             color = vk.ClearColorValue {
-                //float32 = {1.0, 0.0, 1.0, 1.0}
-                float32 = {0.5*math.cos(t)+0.5, 0.0, 0.5*math.sin(t)+0.5, 1.0}
+                float32 = framebuffer.clear_color
             }
         }
     }
@@ -1019,3 +1016,8 @@ cmd_pipeline_barrier :: proc(
     }
     vk.CmdPipelineBarrier2KHR(cb, &info)
 }
+
+Graphics_Pipeline_Info :: struct {
+
+}
+
