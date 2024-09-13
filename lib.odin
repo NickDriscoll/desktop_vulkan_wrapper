@@ -19,11 +19,6 @@ IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
     a = .A,
 }
 
-// Distinct handle types for each Handle_Map in the Graphics_Device
-Buffer_Handle :: distinct hm.Handle
-Image_Handle :: distinct hm.Handle
-Semaphore_Handle :: distinct hm.Handle
-
 float2 :: [2]f32
 float3 :: [3]f32
 float4 :: [4]f32
@@ -78,6 +73,11 @@ Image :: struct {
     image_view: vk.ImageView,
     allocation: vma.Allocation
 }
+
+// Distinct handle types for each Handle_Map in the Graphics_Device
+Buffer_Handle :: distinct hm.Handle
+Image_Handle :: distinct hm.Handle
+Semaphore_Handle :: distinct hm.Handle
 
 // Megastruct holding basically all Vulkan-specific state
 Graphics_Device :: struct {
@@ -183,7 +183,6 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
                 append(&extensions, vk.KHR_WIN32_SURFACE_EXTENSION_NAME)
             }
             when ODIN_OS == .Linux {
-                VK_KHR_win32_surface
                 // @TODO: why is there no vk.KHR_XLIB_SURFACE_EXTENSION_NAME?
                 append(&extensions, "VK_KHR_xlib_surface")
             }
@@ -310,6 +309,7 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
             found_sync2 := false
             found_dynamic_rendering := false
             found_bda := false
+            found_maintenance5 := false
             for ext in device_extensions {
                 name := ext.extensionName
                 if comp_bytes_to_string(name[:], vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME) {
@@ -324,6 +324,10 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
                     found_bda = true
                     log.infof("%s verified", name)
                 }
+                if comp_bytes_to_string(name[:], "VK_KHR_maintenance5") {
+                    found_maintenance5 = true
+                    log.infof("%s verified", name)
+                }
             }
             if !found_sync2 {
                 log.fatal("Your device does not support sync2. Buh bye.")
@@ -333,6 +337,9 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
             }
             if !found_bda {
                 log.fatal("Your device does not support BufferDeviceAddress. Buh bye.")
+            }
+            if !found_maintenance5 {
+                log.fatal("Your device does not support VK_KHR_maintenance5. Buh bye.")
             }
         }
 
@@ -399,6 +406,7 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
                 append(&extensions, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
                 append(&extensions, vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
                 append(&extensions, vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
+                append(&extensions, "VK_KHR_maintenance5")
             }
         }
         
@@ -862,6 +870,18 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
     }
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
 Framebuffer :: struct {
     color_image_views: [8]Image_Handle,
     depth_image_view: Image_Handle,
@@ -1017,7 +1037,113 @@ cmd_pipeline_barrier :: proc(
     vk.CmdPipelineBarrier2KHR(cb, &info)
 }
 
-Graphics_Pipeline_Info :: struct {
 
+
+
+
+
+
+
+Input_Assembly_State :: struct {
+    // flags: PipelineInputAssemblyStateCreateFlags,
+    topology: vk.PrimitiveTopology,
+    primitive_restart_enabled: bool
 }
 
+Pipeline_Handle :: distinct hm.Handle
+Graphics_Pipeline_Info :: struct {
+    vertex_shader_bytecode: [dynamic]u32,
+    fragment_shader_bytecode: [dynamic]u32,
+    input_assembly_state: Input_Assembly_State
+}
+
+create_graphics_pipeline :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeline_Info) -> [dynamic]Pipeline_Handle {
+    pipeline_count := len(infos)
+
+    handles: [dynamic]Pipeline_Handle
+    resize(&handles, pipeline_count)
+
+    create_infos: [dynamic]vk.GraphicsPipelineCreateInfo
+    pipelines: [dynamic]vk.Pipeline
+    input_assembly_states: [dynamic]vk.PipelineInputAssemblyStateCreateInfo
+    defer delete(input_assembly_states)
+    defer delete(create_infos)
+    defer delete(pipelines)
+    resize(&create_infos, pipeline_count)
+    resize(&pipelines, pipeline_count)
+    resize(&input_assembly_states, pipeline_count)
+
+    // Make create infos
+    for info, i in infos {
+        using info
+
+        // Shader state
+        vert_shader_module := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            pNext = nil,
+            flags = nil,
+            codeSize = len(vertex_shader_bytecode),
+            pCode = raw_data(vertex_shader_bytecode)
+        }
+        frag_shader_module := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            pNext = nil,
+            flags = nil,
+            codeSize = len(fragment_shader_bytecode),
+            pCode = raw_data(fragment_shader_bytecode)
+        }
+        vert_shader_info := vk.PipelineShaderStageCreateInfo {
+            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+            pNext = &vert_shader_module,
+            flags = nil,
+            stage = {.VERTEX},
+            module = 0,
+            pName = "vertex_main",
+            pSpecializationInfo = nil
+        }
+        frag_shader_info := vk.PipelineShaderStageCreateInfo {
+            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+            pNext = &frag_shader_module,
+            flags = nil,
+            stage = {.FRAGMENT},
+            module = 0,
+            pName = "fragment_main",
+            pSpecializationInfo = nil
+        }
+
+        shader_infos : [2]vk.PipelineShaderStageCreateInfo = {vert_shader_info, frag_shader_info}
+
+        // Input assembly state
+        input_assembly_states[i] = vk.PipelineInputAssemblyStateCreateInfo {
+            sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            pNext = nil,
+            flags = nil,
+            topology = input_assembly_state.topology,
+            primitiveRestartEnable = b32(input_assembly_state.primitive_restart_enabled)
+        }
+
+        create_infos[i] = vk.GraphicsPipelineCreateInfo {
+            sType = .GRAPHICS_PIPELINE_CREATE_INFO,
+            pNext = nil,
+            flags = nil,
+            stageCount = 2,
+            pStages = raw_data(shader_infos[:]),
+            pVertexInputState = nil,         // Always manually pull vertices in the vertex shader
+            pInputAssemblyState = &input_assembly_states[i]
+        }
+    }
+
+    res := vk.CreateGraphicsPipelines(
+        gd.device,
+        gd.pipeline_cache,
+        u32(pipeline_count),
+        raw_data(create_infos),
+        gd.alloc_callbacks,
+        raw_data(pipelines)
+    )
+    if res != .SUCCESS {
+        log.fatal("Failed to compile graphics pipelines")
+    }
+
+    return handles
+}
