@@ -12,6 +12,9 @@ import vk "vendor:vulkan"
 import "odin-vma/vma"
 import hm "handlemap"
 
+MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
+TOTAL_SAMPLERS :: 2
+
 IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
     r = .R,
     g = .G,
@@ -120,6 +123,16 @@ Graphics_Device :: struct {
     compute_command_buffers: [dynamic]vk.CommandBuffer,
     transfer_command_buffers: [dynamic]vk.CommandBuffer,
     next_gfx_command_buffer: u32,
+
+    // All users of this Vulkan wrapper will access
+    // buffers via their device addresses and
+    // images through this global descriptor set
+    // i.e. all bindless all the time, baby
+    immutable_samplers: [TOTAL_SAMPLERS]vk.Sampler,
+    descriptor_set_layout: vk.DescriptorSetLayout,
+    descriptor_pool: vk.DescriptorPool,
+    descriptor_set: vk.DescriptorSet,
+
 
     // Pipeline layout used for all pipelines
     pipeline_layout: vk.PipelineLayout,
@@ -302,47 +315,50 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
         resize(&device_extensions, int(extension_count))
         vk.EnumerateDeviceExtensionProperties(phys_device, nil, &extension_count, raw_data(device_extensions))
 
-        comp_bytes_to_string :: proc(bytes: []byte, s: string) -> bool {
-            return string(bytes[0:len(s)]) == s
-        }
-
         // Query for extension support,
         // namely Sync2 and dynamic rendering support for now
         if api_version == .Vulkan12 {
-            found_sync2 := false
-            found_dynamic_rendering := false
-            found_bda := false
-            found_maintenance5 := false
+            comp_bytes_to_string :: proc(bytes: []byte, s: string) -> bool {
+                return string(bytes[0:len(s)]) == s
+            }
+
+            Necessary_Extensions :: enum {
+                Sync2,
+                DynamicRendering,
+                BufferDeviceAddress,
+                Maintenance5
+            }
+            necessary_extensions_strings : []string = {
+                vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+                vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+                vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+                "VK_KHR_maintenance5"
+            }
+            
+            extension_flags: bit_set[Necessary_Extensions] = {}
             for ext in device_extensions {
                 name := ext.extensionName
                 if comp_bytes_to_string(name[:], vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME) {
-                    found_sync2 = true
-                    log.infof("%s verified", name)
+                    extension_flags += {.Sync2}
+                    log.debugf("%s verified", name)
                 }
                 if comp_bytes_to_string(name[:], vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME) {
-                    found_dynamic_rendering = true
-                    log.infof("%s verified", name)
+                    extension_flags += {.DynamicRendering}
+                    log.debugf("%s verified", name)
                 }
                 if comp_bytes_to_string(name[:], vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) {
-                    found_bda = true
-                    log.infof("%s verified", name)
+                    extension_flags += {.BufferDeviceAddress}
+                    log.debugf("%s verified", name)
                 }
                 if comp_bytes_to_string(name[:], "VK_KHR_maintenance5") {
-                    found_maintenance5 = true
-                    log.infof("%s verified", name)
+                    extension_flags += {.Maintenance5}
+                    log.debugf("%s verified", name)
                 }
             }
-            if !found_sync2 {
-                log.fatal("Your device does not support sync2. Buh bye.")
-            }
-            if !found_dynamic_rendering {
-                log.fatal("Your device does not support dynamic rendering. Buh bye.")
-            }
-            if !found_bda {
-                log.fatal("Your device does not support BufferDeviceAddress. Buh bye.")
-            }
-            if !found_maintenance5 {
-                log.fatal("Your device does not support VK_KHR_maintenance5. Buh bye.")
+            for e in Necessary_Extensions {
+                if e not_in extension_flags {
+                    log.fatalf("Your device does not support %v. Buh bye.", e)
+                }
             }
         }
 
@@ -511,6 +527,7 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
         }
     }
 
+    // Create command buffers
     gfx_command_buffers: [dynamic]vk.CommandBuffer
     resize(&gfx_command_buffers, int(frames_in_flight))
     compute_command_buffers: [dynamic]vk.CommandBuffer
@@ -550,6 +567,107 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
         }
     }
 
+    // Create bindless descriptor set
+    samplers: [TOTAL_SAMPLERS]vk.Sampler
+    ds_layout: vk.DescriptorSetLayout
+    dp: vk.DescriptorPool
+    ds: vk.DescriptorSet
+    {
+        // Create immutable samplers
+        {
+            full_aniso_info := vk.SamplerCreateInfo {
+                sType = .SAMPLER_CREATE_INFO,
+                pNext = nil,
+                flags = nil,
+                magFilter = .LINEAR,
+                minFilter = .LINEAR,
+                mipmapMode = .LINEAR,
+                addressModeU = .REPEAT,
+                addressModeV = .REPEAT,
+                addressModeW = .REPEAT,
+                mipLodBias = 0.0,
+                anisotropyEnable = true,
+                maxAnisotropy = 16.0
+            }
+            vk.CreateSampler(device, &full_aniso_info, allocation_callbacks, &samplers[0])
+            point_sampler_info := vk.SamplerCreateInfo {
+                sType = .SAMPLER_CREATE_INFO,
+                pNext = nil,
+                flags = nil,
+                magFilter = .NEAREST,
+                minFilter = .NEAREST,
+                mipmapMode = .NEAREST,
+                addressModeU = .REPEAT,
+                addressModeV = .REPEAT,
+                addressModeW = .REPEAT,
+                mipLodBias = 0.0,
+                anisotropyEnable = false
+            }
+            vk.CreateSampler(device, &point_sampler_info, allocation_callbacks, &samplers[1])
+        }
+
+        image_binding := vk.DescriptorSetLayoutBinding {
+            binding = 0,
+            descriptorType = .SAMPLED_IMAGE,
+            descriptorCount = MAXIMUM_BINDLESS_IMAGES,
+            stageFlags = {.FRAGMENT},
+            pImmutableSamplers = nil
+        }
+        sampler_binding := vk.DescriptorSetLayoutBinding {
+            binding = 1,
+            descriptorType = .SAMPLER,
+            descriptorCount = TOTAL_SAMPLERS,
+            stageFlags = {.FRAGMENT},
+            pImmutableSamplers = raw_data(samplers[:])
+        }
+        bindings : []vk.DescriptorSetLayoutBinding = {image_binding, sampler_binding}
+
+        layout_info := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            pNext = nil,
+            flags = {.UPDATE_AFTER_BIND_POOL},
+            bindingCount = 2,
+            pBindings = raw_data(bindings[:])
+        }
+        if vk.CreateDescriptorSetLayout(device, &layout_info, allocation_callbacks, &ds_layout) != .SUCCESS {
+            log.fatal("Failed to create static descriptor set layout.")
+        }
+
+        sizes : []vk.DescriptorPoolSize = {
+            vk.DescriptorPoolSize {
+                type = .SAMPLED_IMAGE,
+                descriptorCount = MAXIMUM_BINDLESS_IMAGES
+            },
+            vk.DescriptorPoolSize {
+                type = .SAMPLER,
+                descriptorCount = TOTAL_SAMPLERS
+            }
+        }
+
+        pool_info := vk.DescriptorPoolCreateInfo {
+            sType = .DESCRIPTOR_POOL_CREATE_INFO,
+            pNext = nil,
+            flags = {.UPDATE_AFTER_BIND},
+            maxSets = 1,
+            poolSizeCount = u32(len(sizes)),
+            pPoolSizes = raw_data(sizes[:])
+        }
+        if vk.CreateDescriptorPool(device, &pool_info, allocation_callbacks, &dp) != .SUCCESS {
+            log.fatal("Failed to create descriptor pool.")
+        }
+
+        set_info := vk.DescriptorSetAllocateInfo {
+            sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+            pNext = nil,
+            descriptorPool = dp,
+            descriptorSetCount = 1,
+            pSetLayouts = &ds_layout
+        }
+        if vk.AllocateDescriptorSets(device, &set_info, &ds) != .SUCCESS {
+            log.fatal("Failed to allocate descriptor sets.")
+        }
+    }
+
     gd := Graphics_Device {
         instance = inst,
         physical_device = phys_device,
@@ -569,10 +687,16 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
         gfx_command_buffers = gfx_command_buffers,
         compute_command_buffers = compute_command_buffers,
         transfer_command_buffers = transfer_command_buffers,
+        immutable_samplers = samplers,
+        descriptor_set_layout = ds_layout,
+        descriptor_pool = dp,
+        descriptor_set = ds
     }
 
     // Init Handle_Maps
     {
+        hm.init(&gd.buffers)
+        hm.init(&gd.images)
         hm.init(&gd.semaphores)
         hm.init(&gd.pipelines)
     }
