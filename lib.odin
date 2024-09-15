@@ -298,8 +298,14 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 features.pNext = &bda_features
                 vk.GetPhysicalDeviceFeatures2(pd, &features)
                 log.debugf("%#v", features)
+                log.debugf("%#v", dynamic_rendering_features)
+                log.debugf("%#v", timeline_features)
+                log.debugf("%#v", bda_features)
+                log.debugf("%#v", maint5_features)
 
-                has_right_features := 
+                has_right_features :=
+                    dynamic_rendering_features.dynamicRendering &&
+                    maint5_features.maintenance5 &&
                     bda_features.bufferDeviceAddress && 
                     sync2_features.synchronization2 &&
                     timeline_features.timelineSemaphore
@@ -312,7 +318,6 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         }
 
         assert(phys_device != nil, "Didn't find vkPhysicalDevice")
-        log.debugf("%#v", features)
 
         // Query the physical device's queue family properties
         queue_family_count : u32 = 0
@@ -337,48 +342,40 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
 
         // Query for extension support,
         // namely Sync2 and dynamic rendering support for now
-        if api_version == .Vulkan12 {
-            comp_bytes_to_string :: proc(bytes: []byte, s: string) -> bool {
-                return string(bytes[0:len(s)]) == s
+        comp_bytes_to_string :: proc(bytes: []byte, s: string) -> bool {
+            return string(bytes[0:len(s)]) == s
+        }
+        
+        necessary_extensions: []string
+        switch api_version {
+            case .Vulkan12: {
+                necessary_extensions = {
+                    vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+                    vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+                    vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+                    "VK_KHR_maintenance5"
+                }
             }
+            case .Vulkan13: {
+                necessary_extensions = {
+                    "VK_KHR_maintenance5"
+                }
+            }
+        }
 
-            Necessary_Extensions :: enum {
-                Sync2,
-                DynamicRendering,
-                BufferDeviceAddress,
-                Maintenance5
-            }
-            necessary_extensions_strings : []string = {
-                vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
-                vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-                vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
-                "VK_KHR_maintenance5"
-            }
-            
-            extension_flags: bit_set[Necessary_Extensions] = {}
-            for ext in device_extensions {
-                name := ext.extensionName
-                if comp_bytes_to_string(name[:], vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME) {
-                    extension_flags += {.Sync2}
-                    log.debugf("%s verified", name)
-                }
-                if comp_bytes_to_string(name[:], vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME) {
-                    extension_flags += {.DynamicRendering}
-                    log.debugf("%s verified", name)
-                }
-                if comp_bytes_to_string(name[:], vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) {
-                    extension_flags += {.BufferDeviceAddress}
-                    log.debugf("%s verified", name)
-                }
-                if comp_bytes_to_string(name[:], "VK_KHR_maintenance5") {
-                    extension_flags += {.Maintenance5}
+        extension_flags: bit_set[0..<4] = {}
+        for ext in device_extensions {
+            name := ext.extensionName
+            for ext_string, i in necessary_extensions {
+                if comp_bytes_to_string(name[:], ext_string) {
+                    extension_flags += {i}
                     log.debugf("%s verified", name)
                 }
             }
-            for e in Necessary_Extensions {
-                if e not_in extension_flags {
-                    log.fatalf("Your device does not support %v. Buh bye.", e)
-                }
+        }
+        for s, i in necessary_extensions {
+            if i not_in extension_flags {
+                log.fatalf("Your device does not support %v. Buh bye.", s)
             }
         }
 
@@ -469,6 +466,19 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
 
     //Load proc addrs that come from the device driver
     vk.load_proc_addresses_device(device)
+
+    // Drivers won't report a function with e.g. a KHR suffix if it has
+    // been promoted to core in the requested Vulkan version which is super annoying
+    {
+        if vk.QueueSubmit2 == nil do vk.QueueSubmit2 = vk.QueueSubmit2KHR
+        if vk.QueueSubmit2KHR == nil do vk.QueueSubmit2KHR = vk.QueueSubmit2
+        if vk.CmdBeginRendering == nil do vk.CmdBeginRendering = vk.CmdBeginRenderingKHR
+        if vk.CmdBeginRenderingKHR == nil do vk.CmdBeginRenderingKHR = vk.CmdBeginRendering
+        if vk.CmdEndRendering == nil do vk.CmdEndRendering = vk.CmdEndRenderingKHR
+        if vk.CmdEndRenderingKHR == nil do vk.CmdEndRenderingKHR = vk.CmdEndRendering
+        if vk.CmdPipelineBarrier2 == nil do vk.CmdPipelineBarrier2 = vk.CmdPipelineBarrier2KHR
+        if vk.CmdPipelineBarrier2KHR == nil do vk.CmdPipelineBarrier2KHR = vk.CmdPipelineBarrier2
+    }
 
     // Initialize the Vulkan Memory Allocator
     allocator: vma.Allocator
@@ -1097,6 +1107,23 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
     }
     vk.CmdBeginRenderingKHR(cb, &info)
 }
+
+cmd_bind_pipeline :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, bind_point: vk.PipelineBindPoint, handle: Pipeline_Handle) -> bool {
+    cb := gd.gfx_command_buffers[cb_idx]
+    pipeline := hm.get(&gd.pipelines, hm.Handle(handle)) or_return
+    vk.CmdBindPipeline(cb, bind_point, pipeline^)
+    return true
+}
+
+cmd_draw :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, vtx_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
+    cb := gd.gfx_command_buffers[cb_idx]
+    vk.CmdDraw(cb, vtx_count, instance_count, first_vertex, first_instance)
+}
+
+// cmd_draw_indexed_indirect :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+//     cb := gd.gfx_command_buffers[cb_idx]
+//     vk.CmdDrawIndexedIndirect(cb, )
+// }
 
 cmd_end_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
     cb := gd.gfx_command_buffers[cb_idx]
