@@ -12,8 +12,20 @@ import vk "vendor:vulkan"
 import "odin-vma/vma"
 import hm "handlemap"
 
+// @HACK: This is a struct in Vulkan that the Odin bindings are missing at the moment
+// This really should be replaced in the future
+vkPhysicalDeviceMaintenance5FeaturesKHR :: struct {
+    sType: vk.StructureType,
+    pNext: rawptr,
+    maintenance5: b32
+}
+VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR :: 1000470000
+
 MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
 TOTAL_SAMPLERS :: 2
+IMAGES_DESCRIPTOR_BINDING :: 0
+SAMPLERS_DESCRIPTOR_BINDING :: 1
+PUSH_CONSTANTS_SIZE :: 128
 
 IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
     r = .R,
@@ -27,11 +39,6 @@ float3 :: [3]f32
 float4 :: [4]f32
 int2 :: [2]i32
 uint2 :: [2]u32
-
-API_Version :: enum {
-    Vulkan12,
-    Vulkan13
-}
 
 Queue_Family :: enum {
     Graphics,
@@ -149,6 +156,11 @@ Graphics_Device :: struct {
     
 }
 
+API_Version :: enum {
+    Vulkan12,
+    Vulkan13
+}
+
 Init_Parameters :: struct {
     // Vulkan instance creation parameters
     app_name: cstring,
@@ -158,6 +170,7 @@ Init_Parameters :: struct {
     api_version: API_Version,
     
     allocation_callbacks: ^vk.AllocationCallbacks,
+    vk_get_instance_proc_addr: rawptr,
     
     frames_in_flight: u32,      // Maximum number of command buffers active at once
     
@@ -166,12 +179,15 @@ Init_Parameters :: struct {
 
 }
 
-init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device {
+init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     assert(frames_in_flight > 0)
     
     log.log(.Info, "Initializing Vulkan instance and device")
     
-    vk.load_proc_addresses_global(sdl2.Vulkan_GetVkGetInstanceProcAddr())
+    if vk_get_instance_proc_addr == nil {
+        log.fatal("Init_Paramenters.vk_get_instance_proc_addr was nil!")
+    }
+    vk.load_proc_addresses_global(vk_get_instance_proc_addr)
     
     // Create Vulkan instance
     // @TODO: Look into vkEnumerateInstanceVersion()
@@ -266,18 +282,22 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
                 timeline_features: vk.PhysicalDeviceTimelineSemaphoreFeatures
                 sync2_features: vk.PhysicalDeviceSynchronization2Features
                 bda_features: vk.PhysicalDeviceBufferDeviceAddressFeatures
+                maint5_features: vkPhysicalDeviceMaintenance5FeaturesKHR
 
                 dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
                 timeline_features.sType = .PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES
                 sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
                 bda_features.sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
+                maint5_features.sType = vk.StructureType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR)
                 features.sType = .PHYSICAL_DEVICE_FEATURES_2
 
+                dynamic_rendering_features.pNext = &maint5_features
                 timeline_features.pNext = &dynamic_rendering_features
                 sync2_features.pNext = &timeline_features
                 bda_features.pNext = &sync2_features
                 features.pNext = &bda_features
                 vk.GetPhysicalDeviceFeatures2(pd, &features)
+                log.debugf("%#v", features)
 
                 has_right_features := 
                     bda_features.bufferDeviceAddress && 
@@ -421,12 +441,12 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
         defer delete(extensions)
         if window_support {
             append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
-            if api_version == .Vulkan12 {
-                append(&extensions, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
-                append(&extensions, vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
-                append(&extensions, vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
-                append(&extensions, "VK_KHR_maintenance5")
-            }
+        }
+        if api_version == .Vulkan12 {
+            append(&extensions, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
+            append(&extensions, vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
+            append(&extensions, vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
+            append(&extensions, "VK_KHR_maintenance5")
         }
         
         // Create logical device
@@ -607,14 +627,14 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
         }
 
         image_binding := vk.DescriptorSetLayoutBinding {
-            binding = 0,
+            binding = IMAGES_DESCRIPTOR_BINDING,
             descriptorType = .SAMPLED_IMAGE,
             descriptorCount = MAXIMUM_BINDLESS_IMAGES,
             stageFlags = {.FRAGMENT},
             pImmutableSamplers = nil
         }
         sampler_binding := vk.DescriptorSetLayoutBinding {
-            binding = 1,
+            binding = SAMPLERS_DESCRIPTOR_BINDING,
             descriptorType = .SAMPLER,
             descriptorCount = TOTAL_SAMPLERS,
             stageFlags = {.FRAGMENT},
@@ -668,6 +688,28 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
         }
     }
 
+    // Create global pipeline layout
+    p_layout: vk.PipelineLayout
+    {
+        pc_range := vk.PushConstantRange {
+            stageFlags = {.VERTEX,.FRAGMENT},
+            offset = 0,
+            size = PUSH_CONSTANTS_SIZE
+        }
+        layout_info := vk.PipelineLayoutCreateInfo {
+            sType = .PIPELINE_LAYOUT_CREATE_INFO,
+            pNext = nil,
+            flags = nil,
+            setLayoutCount = 1,
+            pSetLayouts = &ds_layout,
+            pushConstantRangeCount = 1,
+            pPushConstantRanges = &pc_range
+        }
+        if vk.CreatePipelineLayout(device, &layout_info, allocation_callbacks, &p_layout) != .SUCCESS {
+            log.fatal("Failed to create graphics pipeline layout.")
+        }
+    }
+
     gd := Graphics_Device {
         instance = inst,
         physical_device = phys_device,
@@ -690,7 +732,8 @@ init_graphics_device :: proc(using params: ^Init_Parameters) -> Graphics_Device 
         immutable_samplers = samplers,
         descriptor_set_layout = ds_layout,
         descriptor_pool = dp,
-        descriptor_set = ds
+        descriptor_set = ds,
+        pipeline_layout = p_layout
     }
 
     // Init Handle_Maps
@@ -1010,8 +1053,8 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
 
 
 Framebuffer :: struct {
-    color_image_views: [8]Image_Handle,
-    depth_image_view: Image_Handle,
+    color_images: [8]Image_Handle,
+    depth_image: Image_Handle,
     resolution: uint2,
     clear_color: float4,
 }
@@ -1019,7 +1062,7 @@ Framebuffer :: struct {
 cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
     cb := gd.gfx_command_buffers[cb_idx]
 
-    iv, ok := hm.get(&gd.images, hm.Handle(framebuffer.color_image_views[0]))
+    iv, ok := hm.get(&gd.images, hm.Handle(framebuffer.color_images[0]))
     color_attachment := vk.RenderingAttachmentInfo{
         sType = .RENDERING_ATTACHMENT_INFO_KHR,
         pNext = nil,
@@ -1284,6 +1327,11 @@ default_colorblend_state :: proc() -> ColorBlend_State {
     }
 }
 
+PipelineRenderpass_Info :: struct {
+    color_attachment_formats: []vk.Format,
+    depth_attachment_format: vk.Format
+}
+
 Pipeline_Handle :: distinct hm.Handle
 Graphics_Pipeline_Info :: struct {
     vertex_shader_bytecode: []u32,
@@ -1293,7 +1341,8 @@ Graphics_Pipeline_Info :: struct {
     rasterization_state: Rasterization_State,
     multisample_state: Multisample_State,
     depthstencil_state: DepthStencil_State,
-    colorblend_state: ColorBlend_State
+    colorblend_state: ColorBlend_State,
+    renderpass_state: PipelineRenderpass_Info
 }
 
 create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeline_Info) -> [dynamic]Pipeline_Handle {
@@ -1316,6 +1365,8 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
     depthstencil_states: [dynamic]vk.PipelineDepthStencilStateCreateInfo
     colorblend_attachments: [dynamic]vk.PipelineColorBlendAttachmentState
     colorblend_states: [dynamic]vk.PipelineColorBlendStateCreateInfo
+    renderpass_states: [dynamic]vk.PipelineRenderingCreateInfo
+    defer delete(renderpass_states)
     defer delete(shader_module_infos)
     defer delete(shader_infos)
     defer delete(colorblend_attachments)
@@ -1329,6 +1380,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
     defer delete(create_infos)
     defer delete(pipelines)
     resize(&create_infos, pipeline_count)
+    resize(&renderpass_states, pipeline_count)
     resize(&pipelines, pipeline_count)
     resize(&shader_module_infos, 2 * pipeline_count)
     resize(&shader_infos, 2 * pipeline_count)
@@ -1342,6 +1394,35 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
     resize(&colorblend_states, pipeline_count)
     
     dynamic_states : [2]vk.DynamicState = {.VIEWPORT,.SCISSOR}
+    
+    // Constant pipeline create infos
+    vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
+        sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        pNext = nil,
+        flags = nil,
+        vertexBindingDescriptionCount = 0,
+        pVertexBindingDescriptions = nil,
+        vertexAttributeDescriptionCount = 0,
+        pVertexAttributeDescriptions = nil
+    }
+
+    viewport_info := vk.PipelineViewportStateCreateInfo {
+        sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        pNext = nil,
+        flags = nil,
+        viewportCount = 1,
+        pViewports = nil,
+        scissorCount = 1,
+        pScissors = nil
+    } 
+
+    dynamic_state_info := vk.PipelineDynamicStateCreateInfo {
+        sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        pNext = nil,
+        flags = nil,
+        dynamicStateCount = len(dynamic_states),
+        pDynamicStates = raw_data(dynamic_states[:])
+    }
 
     // Make create infos
     for info, i in infos {
@@ -1352,14 +1433,14 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
             sType = .SHADER_MODULE_CREATE_INFO,
             pNext = nil,
             flags = nil,
-            codeSize = len(vertex_shader_bytecode),
+            codeSize = size_of(u32) * len(vertex_shader_bytecode),
             pCode = raw_data(vertex_shader_bytecode)
         }
         shader_module_infos[2 * i + 1] = vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO,
             pNext = nil,
             flags = nil,
-            codeSize = len(fragment_shader_bytecode),
+            codeSize = size_of(u32) * len(fragment_shader_bytecode),
             pCode = raw_data(fragment_shader_bytecode)
         }
         shader_infos[2 * i] = vk.PipelineShaderStageCreateInfo {
@@ -1368,7 +1449,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
             flags = nil,
             stage = {.VERTEX},
             module = 0,
-            pName = "vertex_main",
+            pName = "main",
             pSpecializationInfo = nil
         }
         shader_infos[2 * i + 1] = vk.PipelineShaderStageCreateInfo {
@@ -1377,7 +1458,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
             flags = nil,
             stage = {.FRAGMENT},
             module = 0,
-            pName = "fragment_main",
+            pName = "main",
             pSpecializationInfo = nil
         }
 
@@ -1462,43 +1543,34 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
             pAttachments = &colorblend_attachments[i],
             blendConstants = colorblend_state.blend_constants
         }
-        
 
-        // Constant pipeline create infos
-        viewport_info := vk.PipelineViewportStateCreateInfo {
-            sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        // Render pass state
+        renderpass_states[i] = vk.PipelineRenderingCreateInfo {
+            sType = .PIPELINE_RENDERING_CREATE_INFO,
             pNext = nil,
-            flags = nil,
-            viewportCount = 1,
-            pViewports = nil,
-            scissorCount = 1,
-            pScissors = nil
-        } 
-
-        dynamic_state_info := vk.PipelineDynamicStateCreateInfo {
-            sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-            pNext = nil,
-            flags = nil,
-            dynamicStateCount = len(dynamic_states),
-            pDynamicStates = raw_data(dynamic_states[:])
+            viewMask = 0,
+            colorAttachmentCount = u32(len(renderpass_state.color_attachment_formats)),
+            pColorAttachmentFormats = raw_data(renderpass_state.color_attachment_formats),
+            depthAttachmentFormat = renderpass_state.depth_attachment_format,
+            stencilAttachmentFormat = nil
         }
 
         create_infos[i] = vk.GraphicsPipelineCreateInfo {
             sType = .GRAPHICS_PIPELINE_CREATE_INFO,
-            pNext = nil,
+            pNext = &renderpass_states[i],
             flags = nil,
             stageCount = 2,
-            pStages = raw_data(shader_infos[2 * i:]),
-            pVertexInputState = nil,         // Always manually pull vertices in the vertex shader
+            pStages = &shader_infos[2 * i],
+            pVertexInputState = &vertex_input_info,         // Always manually pull vertices in the vertex shader
             pInputAssemblyState = &input_assembly_states[i],
-            pTessellationState = nil,
+            pTessellationState = &tessellation_states[i],
             pViewportState = &viewport_info,
             pRasterizationState = &rasterization_states[i],
             pMultisampleState = &multisample_states[i],
             pDepthStencilState = &depthstencil_states[i],
             pColorBlendState = &colorblend_states[i],
             pDynamicState = &dynamic_state_info,
-            //layout = uhhhh,
+            layout = gd.pipeline_layout,
             renderPass = 0,
             subpass = 0,
             basePipelineHandle = 0,
