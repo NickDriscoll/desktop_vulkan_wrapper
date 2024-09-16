@@ -12,15 +12,6 @@ import vk "vendor:vulkan"
 import "odin-vma/vma"
 import hm "handlemap"
 
-// @HACK: This is a struct in Vulkan that the Odin bindings are missing at the moment
-// This really should be replaced in the future
-vkPhysicalDeviceMaintenance5FeaturesKHR :: struct {
-    sType: vk.StructureType,
-    pNext: rawptr,
-    maintenance5: b32
-}
-VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR :: 1000470000
-
 MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
 TOTAL_SAMPLERS :: 2
 IMAGES_DESCRIPTOR_BINDING :: 0
@@ -39,6 +30,11 @@ float3 :: [3]f32
 float4 :: [4]f32
 int2 :: [2]i32
 uint2 :: [2]u32
+
+Format :: vk.Format
+Offset2D :: vk.Offset2D
+Extent2D :: vk.Extent2D
+ImageSubresourceRange :: vk.ImageSubresourceRange
 
 Queue_Family :: enum {
     Graphics,
@@ -282,16 +278,13 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 timeline_features: vk.PhysicalDeviceTimelineSemaphoreFeatures
                 sync2_features: vk.PhysicalDeviceSynchronization2Features
                 bda_features: vk.PhysicalDeviceBufferDeviceAddressFeatures
-                maint5_features: vkPhysicalDeviceMaintenance5FeaturesKHR
 
                 dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
                 timeline_features.sType = .PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES
                 sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
                 bda_features.sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
-                maint5_features.sType = vk.StructureType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR)
                 features.sType = .PHYSICAL_DEVICE_FEATURES_2
 
-                dynamic_rendering_features.pNext = &maint5_features
                 timeline_features.pNext = &dynamic_rendering_features
                 sync2_features.pNext = &timeline_features
                 bda_features.pNext = &sync2_features
@@ -301,11 +294,9 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 log.debugf("%#v", dynamic_rendering_features)
                 log.debugf("%#v", timeline_features)
                 log.debugf("%#v", bda_features)
-                log.debugf("%#v", maint5_features)
 
                 has_right_features :=
                     dynamic_rendering_features.dynamicRendering &&
-                    maint5_features.maintenance5 &&
                     bda_features.bufferDeviceAddress && 
                     sync2_features.synchronization2 &&
                     timeline_features.timelineSemaphore
@@ -352,14 +343,11 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 necessary_extensions = {
                     vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
                     vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-                    vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
-                    "VK_KHR_maintenance5"
+                    vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME
                 }
             }
             case .Vulkan13: {
-                necessary_extensions = {
-                    "VK_KHR_maintenance5"
-                }
+                necessary_extensions = {}
             }
         }
 
@@ -443,7 +431,6 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             append(&extensions, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
             append(&extensions, vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
             append(&extensions, vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
-            append(&extensions, "VK_KHR_maintenance5")
         }
         
         // Create logical device
@@ -472,10 +459,13 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     {
         if vk.QueueSubmit2 == nil do vk.QueueSubmit2 = vk.QueueSubmit2KHR
         if vk.QueueSubmit2KHR == nil do vk.QueueSubmit2KHR = vk.QueueSubmit2
+
         if vk.CmdBeginRendering == nil do vk.CmdBeginRendering = vk.CmdBeginRenderingKHR
         if vk.CmdBeginRenderingKHR == nil do vk.CmdBeginRenderingKHR = vk.CmdBeginRendering
+
         if vk.CmdEndRendering == nil do vk.CmdEndRendering = vk.CmdEndRenderingKHR
         if vk.CmdEndRenderingKHR == nil do vk.CmdEndRenderingKHR = vk.CmdEndRendering
+
         if vk.CmdPipelineBarrier2 == nil do vk.CmdPipelineBarrier2 = vk.CmdPipelineBarrier2KHR
         if vk.CmdPipelineBarrier2KHR == nil do vk.CmdPipelineBarrier2KHR = vk.CmdPipelineBarrier2
     }
@@ -1108,16 +1098,50 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
     vk.CmdBeginRenderingKHR(cb, &info)
 }
 
-cmd_bind_pipeline :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, bind_point: vk.PipelineBindPoint, handle: Pipeline_Handle) -> bool {
+cmd_bind_pipeline :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    bind_point: vk.PipelineBindPoint,
+    handle: Pipeline_Handle
+) -> bool {
     cb := gd.gfx_command_buffers[cb_idx]
     pipeline := hm.get(&gd.pipelines, hm.Handle(handle)) or_return
     vk.CmdBindPipeline(cb, bind_point, pipeline^)
     return true
 }
 
-cmd_draw :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, vtx_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
+cmd_draw :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    vtx_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32
+) {
     cb := gd.gfx_command_buffers[cb_idx]
     vk.CmdDraw(cb, vtx_count, instance_count, first_vertex, first_instance)
+}
+
+Viewport :: vk.Viewport
+cmd_set_viewport :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    first_viewport: u32,
+    viewports: []Viewport
+) {
+    cb := gd.gfx_command_buffers[cb_idx]
+    vk.CmdSetViewport(cb, first_viewport, u32(len(viewports)), raw_data(viewports))
+}
+
+Scissor :: vk.Rect2D
+cmd_set_scissor :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    first_scissor: u32,
+    scissors: []Scissor
+) {
+    cb := gd.gfx_command_buffers[cb_idx]
+    vk.CmdSetScissor(cb, first_scissor, u32(len(scissors)), raw_data(scissors))
 }
 
 // cmd_draw_indexed_indirect :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
@@ -1359,6 +1383,21 @@ PipelineRenderpass_Info :: struct {
     depth_attachment_format: vk.Format
 }
 
+create_shader_module :: proc(gd: ^Graphics_Device, code: []u32) -> vk.ShaderModule {
+    info := vk.ShaderModuleCreateInfo {
+        sType = .SHADER_MODULE_CREATE_INFO,
+        pNext = nil,
+        flags = nil,
+        codeSize = size_of(u32) * len(code),
+        pCode = raw_data(code)
+    }
+    mod: vk.ShaderModule
+    if vk.CreateShaderModule(gd.device, &info, gd.alloc_callbacks, &mod) != .SUCCESS {
+        log.error("Failed to create shader module.")
+    }
+    return mod
+}
+
 Pipeline_Handle :: distinct hm.Handle
 Graphics_Pipeline_Info :: struct {
     vertex_shader_bytecode: []u32,
@@ -1379,46 +1418,64 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
     handles: [dynamic]Pipeline_Handle
     resize(&handles, pipeline_count)
 
+
+
     // One dynamic array for each thing in Graphics_Pipeline_Info
     create_infos: [dynamic]vk.GraphicsPipelineCreateInfo
+    defer delete(create_infos)
+    resize(&create_infos, pipeline_count)
+
     pipelines: [dynamic]vk.Pipeline
-    shader_module_infos: [dynamic]vk.ShaderModuleCreateInfo
+    defer delete(pipelines)
+    resize(&pipelines, pipeline_count)
+
+    shader_modules: [dynamic]vk.ShaderModule
+    defer delete(shader_modules)
+    resize(&shader_modules, 2 * pipeline_count)
+
+    defer for module in shader_modules {
+        vk.DestroyShaderModule(gd.device, module, gd.alloc_callbacks)
+    }    
+
     shader_infos: [dynamic]vk.PipelineShaderStageCreateInfo
+    defer delete(shader_infos)
+    resize(&shader_infos, 2 * pipeline_count)
+    
     input_assembly_states: [dynamic]vk.PipelineInputAssemblyStateCreateInfo
+    resize(&input_assembly_states, pipeline_count)
+    defer delete(input_assembly_states)
+    
     tessellation_states: [dynamic]vk.PipelineTessellationStateCreateInfo
+    defer delete(tessellation_states)
+    resize(&tessellation_states, pipeline_count)
+    
     rasterization_states: [dynamic]vk.PipelineRasterizationStateCreateInfo
+    defer delete(rasterization_states)
+    resize(&rasterization_states, pipeline_count)
+    
     multisample_states: [dynamic]vk.PipelineMultisampleStateCreateInfo
+    defer delete(multisample_states)
+    resize(&multisample_states, pipeline_count)
+    
     sample_masks: [dynamic]vk.SampleMask
+    defer delete(sample_masks)
+    resize(&sample_masks, pipeline_count)
+    
     depthstencil_states: [dynamic]vk.PipelineDepthStencilStateCreateInfo
+    defer delete(depthstencil_states)
+    resize(&depthstencil_states, pipeline_count)
+
     colorblend_attachments: [dynamic]vk.PipelineColorBlendAttachmentState
+    defer delete(colorblend_attachments)
+    resize(&colorblend_attachments, pipeline_count)
+    
     colorblend_states: [dynamic]vk.PipelineColorBlendStateCreateInfo
+    defer delete(colorblend_states)
+    resize(&colorblend_states, pipeline_count)
+    
     renderpass_states: [dynamic]vk.PipelineRenderingCreateInfo
     defer delete(renderpass_states)
-    defer delete(shader_module_infos)
-    defer delete(shader_infos)
-    defer delete(colorblend_attachments)
-    defer delete(colorblend_states)
-    defer delete(depthstencil_states)
-    defer delete(sample_masks)
-    defer delete(multisample_states)
-    defer delete(tessellation_states)
-    defer delete(rasterization_states)
-    defer delete(input_assembly_states)
-    defer delete(create_infos)
-    defer delete(pipelines)
-    resize(&create_infos, pipeline_count)
     resize(&renderpass_states, pipeline_count)
-    resize(&pipelines, pipeline_count)
-    resize(&shader_module_infos, 2 * pipeline_count)
-    resize(&shader_infos, 2 * pipeline_count)
-    resize(&input_assembly_states, pipeline_count)
-    resize(&tessellation_states, pipeline_count)
-    resize(&rasterization_states, pipeline_count)
-    resize(&multisample_states, pipeline_count)
-    resize(&sample_masks, pipeline_count)
-    resize(&depthstencil_states, pipeline_count)
-    resize(&colorblend_attachments, pipeline_count)
-    resize(&colorblend_states, pipeline_count)
     
     dynamic_states : [2]vk.DynamicState = {.VIEWPORT,.SCISSOR}
     
@@ -1456,35 +1513,23 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
         using info
 
         // Shader state
-        shader_module_infos[2 * i] = vk.ShaderModuleCreateInfo {
-            sType = .SHADER_MODULE_CREATE_INFO,
-            pNext = nil,
-            flags = nil,
-            codeSize = size_of(u32) * len(vertex_shader_bytecode),
-            pCode = raw_data(vertex_shader_bytecode)
-        }
-        shader_module_infos[2 * i + 1] = vk.ShaderModuleCreateInfo {
-            sType = .SHADER_MODULE_CREATE_INFO,
-            pNext = nil,
-            flags = nil,
-            codeSize = size_of(u32) * len(fragment_shader_bytecode),
-            pCode = raw_data(fragment_shader_bytecode)
-        }
+        shader_modules[2 * i] =     create_shader_module(gd, vertex_shader_bytecode)
+        shader_modules[2 * i + 1] = create_shader_module(gd, fragment_shader_bytecode)
         shader_infos[2 * i] = vk.PipelineShaderStageCreateInfo {
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-            pNext = &shader_module_infos[2 * i],
+            pNext = nil,
             flags = nil,
             stage = {.VERTEX},
-            module = 0,
+            module = shader_modules[2 * i],
             pName = "main",
             pSpecializationInfo = nil
         }
         shader_infos[2 * i + 1] = vk.PipelineShaderStageCreateInfo {
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-            pNext = &shader_module_infos[2 * i + 1],
+            pNext = nil,
             flags = nil,
             stage = {.FRAGMENT},
-            module = 0,
+            module = shader_modules[2 * i + 1],
             pName = "main",
             pSpecializationInfo = nil
         }
