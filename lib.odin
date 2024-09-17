@@ -1308,7 +1308,7 @@ Multisample_State :: struct {
     sample_count: vk.SampleCountFlags,
     do_sample_shading: bool,
     min_sample_shading: f32,
-    sample_mask: vk.SampleMask,
+    sample_mask: ^vk.SampleMask,
     do_alpha_to_coverage: bool,
     do_alpha_to_one: bool
 }
@@ -1457,7 +1457,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
     defer delete(multisample_states)
     resize(&multisample_states, pipeline_count)
     
-    sample_masks: [dynamic]vk.SampleMask
+    sample_masks: [dynamic]^vk.SampleMask
     defer delete(sample_masks)
     resize(&sample_masks, pipeline_count)
     
@@ -1576,7 +1576,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
             rasterizationSamples = multisample_state.sample_count,
             sampleShadingEnable = b32(multisample_state.do_sample_shading),
             minSampleShading = multisample_state.min_sample_shading,
-            pSampleMask = &sample_masks[i]
+            pSampleMask = sample_masks[i]
         }
 
         // Depth-stencil state
