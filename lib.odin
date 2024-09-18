@@ -5,7 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:log"
 import "core:math"
-import win32 "core:sys/windows"
+import "core:mem"
 import "vendor:sdl2"
 import vk "vendor:vulkan"
 
@@ -16,7 +16,10 @@ MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
 TOTAL_SAMPLERS :: 2
 IMAGES_DESCRIPTOR_BINDING :: 0
 SAMPLERS_DESCRIPTOR_BINDING :: 1
+
+// Sizes in bytes
 PUSH_CONSTANTS_SIZE :: 128
+STAGING_BUFFER_SIZE :: 128 * 1024 * 1024
 
 IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
     r = .R,
@@ -94,7 +97,6 @@ Graphics_Device :: struct {
     pipeline_cache: vk.PipelineCache,
     alloc_callbacks: ^vk.AllocationCallbacks,
     allocator: vma.Allocator,
-    //vma_alloc_callbacks: ^vma.Allcation_ca,
     frames_in_flight: u32,
     frame_count: u64,
     
@@ -106,7 +108,6 @@ Graphics_Device :: struct {
     swapchain_images: [dynamic]Image_Handle,
     acquire_semaphores: [dynamic]Semaphore_Handle,
     present_semaphores: [dynamic]Semaphore_Handle,
-    
     
     // The Vulkan queues that the device will submit on
     // May be aliases of each other if e.g. the GPU doesn't have
@@ -136,6 +137,11 @@ Graphics_Device :: struct {
     descriptor_pool: vk.DescriptorPool,
     descriptor_set: vk.DescriptorSet,
 
+    // Host-mappable GPU buffer used for doing data
+    // transfer between host and device memory
+    staging_buffer: Buffer_Handle,
+    staging_buffer_offest: u64,
+
 
     // Pipeline layout used for all pipelines
     pipeline_layout: vk.PipelineLayout,
@@ -148,7 +154,6 @@ Graphics_Device :: struct {
 
     // Deletion queues for Buffers and Images
     buffer_deletes: queue.Queue(Buffer_Delete)
-    
     
 }
 
@@ -163,7 +168,7 @@ Init_Parameters :: struct {
     app_version: u32,
     engine_name: cstring,
     engine_version: u32,
-    api_version: API_Version,
+    api_version: API_Version,       // @TODO: Get rid of this?
     
     allocation_callbacks: ^vk.AllocationCallbacks,
     vk_get_instance_proc_addr: rawptr,
@@ -181,7 +186,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     log.log(.Info, "Initializing Vulkan instance and device")
     
     if vk_get_instance_proc_addr == nil {
-        log.fatal("Init_Paramenters.vk_get_instance_proc_addr was nil!")
+        log.error("Init_Paramenters.vk_get_instance_proc_addr was nil!")
     }
     vk.load_proc_addresses_global(vk_get_instance_proc_addr)
     
@@ -237,7 +242,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         }
         
         if vk.CreateInstance(&create_info, allocation_callbacks, &inst) != .SUCCESS {
-            log.fatal("Instance creation failed.")
+            log.error("Instance creation failed.")
         }
     }
 
@@ -343,11 +348,14 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 necessary_extensions = {
                     vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
                     vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-                    vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME
+                    vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+                    vk.EXT_MEMORY_BUDGET_EXTENSION_NAME
                 }
             }
             case .Vulkan13: {
-                necessary_extensions = {}
+                necessary_extensions = {
+                    vk.EXT_MEMORY_BUDGET_EXTENSION_NAME
+                }
             }
         }
 
@@ -363,7 +371,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         }
         for s, i in necessary_extensions {
             if i not_in extension_flags {
-                log.fatalf("Your device does not support %v. Buh bye.", s)
+                log.errorf("Your device does not support %v. Buh bye.", s)
             }
         }
 
@@ -424,6 +432,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         // Device extensions
         extensions: [dynamic]cstring
         defer delete(extensions)
+        append(&extensions, vk.EXT_MEMORY_BUDGET_EXTENSION_NAME)
         if window_support {
             append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
         }
@@ -447,7 +456,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         }
         
         if vk.CreateDevice(phys_device, &create_info, allocation_callbacks, &device) != .SUCCESS {
-            log.fatal("Failed to create device.")
+            log.error("Failed to create device.")
         }
     }
 
@@ -483,7 +492,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         fns := vma.create_vulkan_functions()
 
         info := vma.Allocator_Create_Info {
-            flags = {.Externally_Synchronized,.Buffer_Device_Address},
+            flags = {.Externally_Synchronized,.Buffer_Device_Address,.Ext_Memory_Budget},
             physical_device = phys_device,
             device = device,
             preferred_large_heap_block_size = 0,
@@ -496,8 +505,17 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             type_external_memory_handle_types = nil            
         }
         if vma.create_allocator(&info, &allocator) != .SUCCESS {
-            log.fatal("Failed to initialize VMA.")
+            log.error("Failed to initialize VMA.")
         }
+
+        // Debug printing
+        budget: vma.Budget
+        vma.get_heap_budgets(allocator, &budget)
+        log.debugf("%#v", budget)
+
+        stats: vma.Total_Statistics
+        vma.calculate_statistics(allocator, &stats)
+        log.debugf("%#v", stats)
     }
 
     // Cache individual queues
@@ -523,7 +541,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             queueFamilyIndex = gfx_queue_family
         }
         if vk.CreateCommandPool(device, &gfx_pool_info, allocation_callbacks, &gfx_command_pool) != .SUCCESS {
-            log.fatal("Failed to create gfx command pool")
+            log.error("Failed to create gfx command pool")
         }
         
         compute_pool_info := vk.CommandPoolCreateInfo {
@@ -533,7 +551,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             queueFamilyIndex = compute_queue_family
         }
         if vk.CreateCommandPool(device, &compute_pool_info, allocation_callbacks, &compute_command_pool) != .SUCCESS {
-            log.fatal("Failed to create compute command pool")
+            log.error("Failed to create compute command pool")
         }
         
         transfer_pool_info := vk.CommandPoolCreateInfo {
@@ -543,7 +561,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             queueFamilyIndex = transfer_queue_family
         }
         if vk.CreateCommandPool(device, &transfer_pool_info, allocation_callbacks, &transfer_command_pool) != .SUCCESS {
-            log.fatal("Failed to create transfer command pool")
+            log.error("Failed to create transfer command pool")
         }
     }
 
@@ -563,7 +581,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             commandBufferCount = frames_in_flight
         }
         if vk.AllocateCommandBuffers(device, &gfx_info, raw_data(gfx_command_buffers)) != .SUCCESS {
-            log.fatal("Failed to create gfx command buffers")
+            log.error("Failed to create gfx command buffers")
         }
         compute_info := vk.CommandBufferAllocateInfo {
             sType = .COMMAND_BUFFER_ALLOCATE_INFO,
@@ -573,7 +591,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             commandBufferCount = frames_in_flight
         }
         if vk.AllocateCommandBuffers(device, &compute_info, raw_data(compute_command_buffers)) != .SUCCESS {
-            log.fatal("Failed to create compute command buffers")
+            log.error("Failed to create compute command buffers")
         }
         transfer_info := vk.CommandBufferAllocateInfo {
             sType = .COMMAND_BUFFER_ALLOCATE_INFO,
@@ -583,7 +601,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             commandBufferCount = frames_in_flight
         }
         if vk.AllocateCommandBuffers(device, &transfer_info, raw_data(transfer_command_buffers)) != .SUCCESS {
-            log.fatal("Failed to create transfer command buffers")
+            log.error("Failed to create transfer command buffers")
         }
     }
 
@@ -650,7 +668,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             pBindings = raw_data(bindings[:])
         }
         if vk.CreateDescriptorSetLayout(device, &layout_info, allocation_callbacks, &ds_layout) != .SUCCESS {
-            log.fatal("Failed to create static descriptor set layout.")
+            log.error("Failed to create static descriptor set layout.")
         }
 
         sizes : []vk.DescriptorPoolSize = {
@@ -673,7 +691,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             pPoolSizes = raw_data(sizes[:])
         }
         if vk.CreateDescriptorPool(device, &pool_info, allocation_callbacks, &dp) != .SUCCESS {
-            log.fatal("Failed to create descriptor pool.")
+            log.error("Failed to create descriptor pool.")
         }
 
         set_info := vk.DescriptorSetAllocateInfo {
@@ -684,7 +702,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             pSetLayouts = &ds_layout
         }
         if vk.AllocateDescriptorSets(device, &set_info, &ds) != .SUCCESS {
-            log.fatal("Failed to allocate descriptor sets.")
+            log.error("Failed to allocate descriptor sets.")
         }
     }
 
@@ -706,7 +724,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             pPushConstantRanges = &pc_range
         }
         if vk.CreatePipelineLayout(device, &layout_info, allocation_callbacks, &p_layout) != .SUCCESS {
-            log.fatal("Failed to create graphics pipeline layout.")
+            log.error("Failed to create graphics pipeline layout.")
         }
     }
 
@@ -742,6 +760,17 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         hm.init(&gd.images)
         hm.init(&gd.semaphores)
         hm.init(&gd.pipelines)
+    }
+
+    // Create staging buffer
+    {
+        info := Buffer_Info {
+            size = STAGING_BUFFER_SIZE,
+            usage = {.TRANSFER_SRC},
+            alloc_flags = {.Mapped},
+            required_flags = {.DEVICE_LOCAL,.HOST_VISIBLE,.HOST_COHERENT}
+        }
+        gd.staging_buffer = create_buffer(&gd, &info)
     }
 
     return gd
@@ -847,17 +876,20 @@ in_flight_idx :: proc(gd: ^Graphics_Device) -> u64 {
 Buffer_Info :: struct {
     size: vk.DeviceSize,
     usage: vk.BufferUsageFlags,
-    queue_family: Queue_Family,
+    alloc_flags: vma.Allocation_Create_Flags,
+    // queue_family: Queue_Family,
     required_flags: vk.MemoryPropertyFlags
 }
 
 create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Handle {
-    queue_family_index: u32
-    switch buf_info.queue_family {
-        case .Graphics: queue_family_index = gd.gfx_queue_family
-        case .Compute: queue_family_index = gd.compute_queue_family
-        case .Transfer: queue_family_index = gd.transfer_queue_family
-    }
+    // queue_family_index: u32
+    // switch buf_info.queue_family {
+    //     case .Graphics: queue_family_index = gd.gfx_queue_family
+    //     case .Compute: queue_family_index = gd.compute_queue_family
+    //     case .Transfer: queue_family_index = gd.transfer_queue_family
+    // }
+
+    qfis : []u32 = {gd.gfx_queue_family,gd.compute_queue_family,gd.transfer_queue_family}
 
     info := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
@@ -865,26 +897,56 @@ create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Ha
         flags = nil,
         size = buf_info.size,
         usage = buf_info.usage,
-        sharingMode = .EXCLUSIVE,
-        queueFamilyIndexCount = 1,
-        pQueueFamilyIndices = &queue_family_index
+        sharingMode = .CONCURRENT,          // @TODO: Actually evaluate if concurrent buffers on desktop are fine
+        queueFamilyIndexCount = u32(len(qfis)),
+        pQueueFamilyIndices = raw_data(qfis[:])
     }
     alloc_info := vma.Allocation_Create_Info {
-        flags = nil,
+        flags = buf_info.alloc_flags,
         usage = .Auto,
         required_flags = buf_info.required_flags,
         preferred_flags = nil,
         priority = 1.0
     }
     b: Buffer
-    if vma.create_buffer(gd.allocator, &info, &alloc_info, &b.buffer, &b.allocation, &b.alloc_info) != .SUCCESS {
-        log.fatal("Failed to create buffer.")
+    r := vma.create_buffer(gd.allocator, &info, &alloc_info, &b.buffer, &b.allocation, &b.alloc_info)
+    if r != .SUCCESS {
+        log.errorf("Failed to create buffer: %v", r)
     }
     return Buffer_Handle(hm.insert(&gd.buffers, b))
 }
 
 get_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> (^Buffer, bool) {
     return hm.get(&gd.buffers, hm.Handle(handle))
+}
+
+sync_write_buffer :: proc(gd: ^Graphics_Device, in_bytes: []u8, out_buffer: Buffer_Handle) -> bool {
+    b := hm.get(&gd.buffers, hm.Handle(out_buffer)) or_return
+    sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
+    cb := gd.transfer_command_buffers[in_flight_idx(gd)]
+    
+    bytes_size := len(in_bytes)
+    amount_transferred := 0
+    sb_ptr := sb.alloc_info.mapped_data
+
+    for amount_transferred < bytes_size {
+        iter_size := min(bytes_size - amount_transferred, STAGING_BUFFER_SIZE)
+        
+        // Copy to staging buffer
+        p := raw_data(in_bytes[amount_transferred:])
+        mem.copy(sb_ptr, p, iter_size)
+
+        // Copy from staging buffer to actual buffer
+        
+
+        amount_transferred += iter_size
+    }
+
+    // if bytes_size < STAGING_BUFFER_SIZE - gd.staging_buffer_offest {
+    //     vk.CmdCopyBuffer()
+    // }
+
+    return true
 }
 
 delete_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> bool {
@@ -917,7 +979,7 @@ acquire_swapchain_image :: proc(gd: ^Graphics_Device, out_image_idx: ^u32) -> bo
     sem := get_semaphore(gd, gd.acquire_semaphores[idx]) or_return
     
     if vk.AcquireNextImageKHR(gd.device, gd.swapchain, max(u64), sem^, 0, out_image_idx) != .SUCCESS {
-        log.fatal("Failed to acquire swapchain image")
+        log.error("Failed to acquire swapchain image")
         return false
     }
     return true
@@ -938,7 +1000,7 @@ present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: u32) -> bool {
         pResults = nil
     }
     if vk.QueuePresentKHR(gd.gfx_queue, &info) != .SUCCESS {
-        log.fatal("Failed to present swapchain image.")
+        log.error("Failed to present swapchain image.")
         return false
     }
     return true
@@ -953,7 +1015,7 @@ begin_gfx_command_buffer :: proc(gd: ^Graphics_Device, cpu_wait: ^Semaphore_Op) 
 
     if cpu_wait.value > 0 {
         sem, ok := hm.get(&gd.semaphores, hm.Handle(cpu_wait.semaphore))
-        if !ok do log.fatal("Couldn't find semaphore for CPU-sync")
+        if !ok do log.error("Couldn't find semaphore for CPU-sync")
 
         info := vk.SemaphoreWaitInfo {
             sType = .SEMAPHORE_WAIT_INFO,
@@ -964,7 +1026,7 @@ begin_gfx_command_buffer :: proc(gd: ^Graphics_Device, cpu_wait: ^Semaphore_Op) 
             pValues = &cpu_wait.value
         }
         if vk.WaitSemaphores(gd.device, &info, max(u64)) != .SUCCESS {
-            log.fatal("Failed to wait for timeline semaphore CPU-side man what")
+            log.error("Failed to wait for timeline semaphore CPU-side man what")
         }
     }
 
@@ -976,7 +1038,7 @@ begin_gfx_command_buffer :: proc(gd: ^Graphics_Device, cpu_wait: ^Semaphore_Op) 
         pInheritanceInfo = nil
     }
     if vk.BeginCommandBuffer(cb, &info) != .SUCCESS {
-        log.fatal("Unable to begin gfx command buffer.")
+        log.error("Unable to begin gfx command buffer.")
     }
 
     return CommandBuffer_Index(cb_idx)
@@ -985,7 +1047,7 @@ begin_gfx_command_buffer :: proc(gd: ^Graphics_Device, cpu_wait: ^Semaphore_Op) 
 submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, sync: ^Sync_Info) {
     cb := gd.gfx_command_buffers[cb_idx]
     if vk.EndCommandBuffer(cb) != .SUCCESS {
-        log.fatal("Unable to end gfx command buffer")
+        log.error("Unable to end gfx command buffer")
     }
 
     cb_info := vk.CommandBufferSubmitInfo{
@@ -1036,7 +1098,7 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
         pCommandBufferInfos = &cb_info
     }
     if vk.QueueSubmit2KHR(gd.gfx_queue, 1, &info, 0) != .SUCCESS {
-        log.fatal("Unable to submit gfx command buffer")
+        log.error("Unable to submit gfx command buffer")
     }
 }
 
@@ -1177,7 +1239,7 @@ check_timeline_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle)
     sem := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
     v: u64
     if vk.GetSemaphoreCounterValue(gd.device, sem^, &v) != .SUCCESS {
-        log.fatal("Failed to read value from timeline semaphore")
+        log.error("Failed to read value from timeline semaphore")
         return 0, false
     }
     return v, true
@@ -1659,7 +1721,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
         raw_data(pipelines)
     )
     if res != .SUCCESS {
-        log.fatal("Failed to compile graphics pipelines")
+        log.error("Failed to compile graphics pipelines")
     }
 
     // Put newly created pipelines in the Handle_Map
