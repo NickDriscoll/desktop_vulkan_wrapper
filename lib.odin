@@ -65,24 +65,6 @@ delete_sync_info :: proc(s: ^Sync_Info) {
     delete(s.signal_ops)
 }
 
-Buffer :: struct {
-    buffer: vk.Buffer,
-    allocation: vma.Allocation,
-    alloc_info: vma.Allocation_Info
-}
-
-Buffer_Delete :: struct {
-    death_frame: u64,
-    buffer: vk.Buffer,
-    allocation: vma.Allocation
-}
-
-Image :: struct {
-    image: vk.Image,
-    image_view: vk.ImageView,
-    allocation: vma.Allocation
-}
-
 // Distinct handle types for each Handle_Map in the Graphics_Device
 Buffer_Handle :: distinct hm.Handle
 Image_Handle :: distinct hm.Handle
@@ -141,6 +123,8 @@ Graphics_Device :: struct {
     // transfer between host and device memory
     staging_buffer: Buffer_Handle,
     staging_buffer_offest: u64,
+    transfer_timeline: Semaphore_Handle,
+    transfers_completed: u64,
 
 
     // Pipeline layout used for all pipelines
@@ -477,6 +461,9 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
 
         if vk.CmdPipelineBarrier2 == nil do vk.CmdPipelineBarrier2 = vk.CmdPipelineBarrier2KHR
         if vk.CmdPipelineBarrier2KHR == nil do vk.CmdPipelineBarrier2KHR = vk.CmdPipelineBarrier2
+
+        if vk.WaitSemaphores == nil do vk.WaitSemaphores = vk.WaitSemaphoresKHR
+        if vk.WaitSemaphoresKHR == nil do vk.WaitSemaphoresKHR = vk.WaitSemaphores
     }
 
     // Initialize the Vulkan Memory Allocator
@@ -773,6 +760,15 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         gd.staging_buffer = create_buffer(&gd, &info)
     }
 
+    // Create transfer timeline semaphore
+    {
+        info := Semaphore_Info {
+            type = .TIMELINE,
+            init_value = 0
+        }
+        gd.transfer_timeline = create_semaphore(&gd, &info)
+    }
+
     return gd
 }
 
@@ -881,6 +877,18 @@ Buffer_Info :: struct {
     required_flags: vk.MemoryPropertyFlags
 }
 
+Buffer :: struct {
+    buffer: vk.Buffer,
+    allocation: vma.Allocation,
+    alloc_info: vma.Allocation_Info
+}
+
+Buffer_Delete :: struct {
+    death_frame: u64,
+    buffer: vk.Buffer,
+    allocation: vma.Allocation
+}
+
 create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Handle {
     // queue_family_index: u32
     // switch buf_info.queue_family {
@@ -920,14 +928,19 @@ get_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> (^Buffer, boo
     return hm.get(&gd.buffers, hm.Handle(handle))
 }
 
+// Blocking function for writing to a GPU buffer
+// Use when the data is small or if you don't care about stalling
 sync_write_buffer :: proc(gd: ^Graphics_Device, in_bytes: []u8, out_buffer: Buffer_Handle) -> bool {
-    b := hm.get(&gd.buffers, hm.Handle(out_buffer)) or_return
-    sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
+    out_buf := hm.get(&gd.buffers, hm.Handle(out_buffer)) or_return
+    semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+    
+    // Staging buffer
+    sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
+    sb_ptr := sb.alloc_info.mapped_data
     
     bytes_size := len(in_bytes)
     amount_transferred := 0
-    sb_ptr := sb.alloc_info.mapped_data
 
     for amount_transferred < bytes_size {
         iter_size := min(bytes_size - amount_transferred, STAGING_BUFFER_SIZE)
@@ -936,15 +949,73 @@ sync_write_buffer :: proc(gd: ^Graphics_Device, in_bytes: []u8, out_buffer: Buff
         p := raw_data(in_bytes[amount_transferred:])
         mem.copy(sb_ptr, p, iter_size)
 
-        // Copy from staging buffer to actual buffer
-        
+        // Begin transfer command buffer
+        begin_info := vk.CommandBufferBeginInfo {
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            pNext = nil,
+            flags = {.ONE_TIME_SUBMIT},
+            pInheritanceInfo = nil
+        }
+        vk.BeginCommandBuffer(cb, &begin_info)
 
+        // Copy from staging buffer to actual buffer
+        buffer_copy := vk.BufferCopy {
+            srcOffset = 0,
+            dstOffset = vk.DeviceSize(amount_transferred),
+            size = vk.DeviceSize(iter_size)
+        }
+        vk.CmdCopyBuffer(cb, sb.buffer, out_buf.buffer, 1, &buffer_copy)
+        vk.EndCommandBuffer(cb)
+
+        // Actually submit this lonesome command to the transfer queue
+        cb_info := vk.CommandBufferSubmitInfo {
+            sType = .COMMAND_BUFFER_SUBMIT_INFO,
+            pNext = nil,
+            commandBuffer = cb,
+            deviceMask = 0
+        }
+
+        // Increment transfer timeline counter
+        new_timeline_value := gd.transfers_completed + 1
+        signal_info := vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            pNext = nil,
+            semaphore = semaphore^,
+            value = new_timeline_value,
+            stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+            deviceIndex = 0
+        }
+
+        submit_info := vk.SubmitInfo2 {
+            sType = .SUBMIT_INFO_2,
+            pNext = nil,
+            flags = nil,
+            commandBufferInfoCount = 1,
+            pCommandBufferInfos = &cb_info,
+            signalSemaphoreInfoCount = 1,
+            pSignalSemaphoreInfos = &signal_info
+        }
+        if vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
+            log.error("Failed to submit to transfer queue.")
+        }
+
+        // CPU wait
+        wait_info := vk.SemaphoreWaitInfo {
+            sType = .SEMAPHORE_WAIT_INFO,
+            pNext = nil,
+            flags = nil,
+            semaphoreCount = 1,
+            pSemaphores = semaphore,
+            pValues = &new_timeline_value
+        }
+        if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
+            log.error("Failed to wait for transfer semaphore.")
+        }
+        log.debugf("Transferred %v bytes of buffer data to buffer handle %v", iter_size, out_buffer)
+
+        gd.transfers_completed += 1
         amount_transferred += iter_size
     }
-
-    // if bytes_size < STAGING_BUFFER_SIZE - gd.staging_buffer_offest {
-    //     vk.CmdCopyBuffer()
-    // }
 
     return true
 }
@@ -961,6 +1032,121 @@ delete_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> bool {
     hm.remove(&gd.buffers, hm.Handle(handle))
 
     return true
+}
+
+Image :: struct {
+    image: vk.Image,
+    image_view: vk.ImageView,
+    allocation: vma.Allocation,
+    alloc_info: vma.Allocation_Info
+}
+Image_Info :: struct {
+    flags: vk.ImageCreateFlags,
+    image_type: vk.ImageType,
+    format: vk.Format,
+    extent: vk.Extent3D,
+    has_mipmaps: bool,
+    array_layers: u32,
+    samples: vk.SampleCountFlags,
+    tiling: vk.ImageTiling,
+    usage: vk.ImageUsageFlags,
+    queue_family: Queue_Family,
+    initial_layout: vk.ImageLayout,
+    alloc_flags: vma.Allocation_Create_Flags,
+}
+
+create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Info) -> Image_Handle {
+    // Calculate mipmap count
+    mip_count := 1
+    if has_mipmaps {
+        // Mipmaps are only for 2D images at least rn
+        assert(image_type == .D2)
+
+
+    }
+
+    qfi: u32
+    switch queue_family {
+        case .Graphics: qfi = gd.gfx_queue_family
+        case .Compute: qfi = gd.compute_queue_family
+        case .Transfer: qfi = gd.transfer_queue_family
+    }
+
+    image: Image
+    {
+        info := vk.ImageCreateInfo {
+            sType = .IMAGE_CREATE_INFO,
+            pNext = nil,
+            flags = flags,
+            imageType = image_type,
+            format = format,
+            extent = extent,
+            mipLevels = u32(mip_count),
+            arrayLayers = array_layers,
+            samples = samples,
+            tiling = tiling,
+            usage = usage,
+            sharingMode = .EXCLUSIVE,
+            queueFamilyIndexCount = 1,
+            pQueueFamilyIndices = &qfi,
+            initialLayout = initial_layout
+        }
+        alloc_info := vma.Allocation_Create_Info {
+            flags = alloc_flags,
+            usage = .Auto,
+            required_flags = {.DEVICE_LOCAL},
+            preferred_flags = nil,
+            priority = 1.0
+        }
+        if vma.create_image(
+            gd.allocator,
+            &info,
+            &alloc_info,
+            &image.image,
+            &image.allocation,
+            &image.alloc_info
+        ) != .SUCCESS {
+            log.error("Failed to create image.")
+        }
+    }
+
+    // Create the image view
+    {
+        view_type: vk.ImageViewType
+        switch image_type {
+            case .D1: view_type = .D1
+            case .D2: view_type = .D2
+            case .D3: view_type = .D3
+        }
+
+        subresource_range := vk.ImageSubresourceRange {
+            aspectMask = {.COLOR},
+            baseMipLevel = 0,
+            levelCount = u32(mip_count),
+            baseArrayLayer = 0,
+            layerCount = array_layers
+        }
+
+        info := vk.ImageViewCreateInfo {
+            sType = .IMAGE_VIEW_CREATE_INFO,
+            pNext = nil,
+            flags = nil,
+            image = image.image,
+            viewType = view_type,
+            format = format,
+            components = IDENTITY_COMPONENT_SWIZZLE,
+            subresourceRange = subresource_range
+        }
+        if vk.CreateImageView(gd.device, &info, gd.alloc_callbacks, &image.image_view) != .SUCCESS {
+            log.error("Failed to create image view.")
+        }
+    }
+
+    return Image_Handle(hm.insert(&gd.images, image))
+}
+
+get_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (^Image, bool) {
+    return hm.get(&gd.images, hm.Handle(handle))
 }
 
 tick_deletion_queues :: proc(gd: ^Graphics_Device) {
@@ -1206,10 +1392,19 @@ cmd_set_scissor :: proc(
     vk.CmdSetScissor(cb, first_scissor, u32(len(scissors)), raw_data(scissors))
 }
 
-// cmd_draw_indexed_indirect :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
-//     cb := gd.gfx_command_buffers[cb_idx]
-//     vk.CmdDrawIndexedIndirect(cb, )
-// }
+cmd_draw_indexed_indirect :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    draw_buffer_handle: Buffer_Handle,
+    offset: u64,
+    draw_count: u32
+) -> bool {
+    cb := gd.gfx_command_buffers[cb_idx]
+    draw_buffer := hm.get(&gd.buffers, hm.Handle(draw_buffer_handle)) or_return
+    vk.CmdDrawIndexedIndirect(cb, draw_buffer.buffer, vk.DeviceSize(offset), draw_count, size_of(vk.DrawIndexedIndirectCommand))
+
+    return true
+}
 
 cmd_end_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
     cb := gd.gfx_command_buffers[cb_idx]
