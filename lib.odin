@@ -1526,6 +1526,12 @@ cmd_set_scissor :: proc(
     vk.CmdSetScissor(cb, first_scissor, u32(len(scissors)), raw_data(scissors))
 }
 
+cmd_push_constants_gfx :: proc($Element_Type: typeid, gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, in_slice: []Element_Type) {
+    cb := gd.gfx_command_buffers[cb_idx]
+    byte_count : u32 = u32(len(in_slice) * size_of(Element_Type))
+    vk.CmdPushConstants(cb, gd.pipeline_layout, {.VERTEX,.FRAGMENT}, 0, byte_count, raw_data(in_slice));
+}
+
 cmd_bind_index_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, buffer: Buffer_Handle) -> bool {
     cb := gd.gfx_command_buffers[cb_idx]
     b := hm.get(&gd.buffers, hm.Handle(buffer)) or_return
