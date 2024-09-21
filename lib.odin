@@ -2,10 +2,12 @@ package desktop_vulkan_wrapper
 
 import "core:container/queue"
 import "core:fmt"
-import "core:os"
 import "core:log"
 import "core:math"
 import "core:mem"
+import "core:os"
+import "core:slice"
+
 import "vendor:sdl2"
 import vk "vendor:vulkan"
 
@@ -932,23 +934,24 @@ get_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> (^Buffer, boo
 
 // Blocking function for writing to a GPU buffer
 // Use when the data is small or if you don't care about stalling
-sync_write_buffer :: proc(gd: ^Graphics_Device, out_buffer: Buffer_Handle, in_bytes: []u8) -> bool {
+sync_write_buffer :: proc($Element_Type: typeid, gd: ^Graphics_Device, out_buffer: Buffer_Handle, in_slice: []Element_Type) -> bool {
     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
     out_buf := hm.get(&gd.buffers, hm.Handle(out_buffer)) or_return
     semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+    in_bytes := slice.from_ptr(slice.as_ptr(in_slice), len(in_slice) * size_of(Element_Type))
     
     // Staging buffer
     sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     sb_ptr := sb.alloc_info.mapped_data
     
-    bytes_size := len(in_bytes)
-    amount_transferred := 0
+    total_bytes := len(in_bytes)
+    bytes_transferred := 0
 
-    for amount_transferred < bytes_size {
-        iter_size := min(bytes_size - amount_transferred, STAGING_BUFFER_SIZE)
+    for bytes_transferred < total_bytes {
+        iter_size := min(total_bytes - bytes_transferred, STAGING_BUFFER_SIZE)
         
         // Copy to staging buffer
-        p := raw_data(in_bytes[amount_transferred:])
+        p := &in_bytes[bytes_transferred]
         mem.copy(sb_ptr, p, iter_size)
 
         // Begin transfer command buffer
@@ -963,7 +966,7 @@ sync_write_buffer :: proc(gd: ^Graphics_Device, out_buffer: Buffer_Handle, in_by
         // Copy from staging buffer to actual buffer
         buffer_copy := vk.BufferCopy {
             srcOffset = 0,
-            dstOffset = vk.DeviceSize(amount_transferred),
+            dstOffset = vk.DeviceSize(bytes_transferred),
             size = vk.DeviceSize(iter_size)
         }
         vk.CmdCopyBuffer(cb, sb.buffer, out_buf.buffer, 1, &buffer_copy)
@@ -1016,7 +1019,7 @@ sync_write_buffer :: proc(gd: ^Graphics_Device, out_buffer: Buffer_Handle, in_by
         log.debugf("Transferred %v bytes of buffer data to buffer handle %v", iter_size, out_buffer)
 
         gd.transfers_completed += 1
-        amount_transferred += iter_size
+        bytes_transferred += iter_size
     }
 
     return true
