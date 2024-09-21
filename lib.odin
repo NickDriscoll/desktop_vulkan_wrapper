@@ -504,9 +504,9 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         vma.get_heap_budgets(allocator, &budget)
         log.debugf("%#v", budget)
 
-        stats: vma.Total_Statistics
-        vma.calculate_statistics(allocator, &stats)
-        log.debugf("%#v", stats)
+        // stats: vma.Total_Statistics
+        // vma.calculate_statistics(allocator, &stats)
+        // log.debugf("%#v", stats)
     }
 
     // Cache individual queues
@@ -1049,7 +1049,6 @@ Image_Create :: struct {
     samples: vk.SampleCountFlags,
     tiling: vk.ImageTiling,
     usage: vk.ImageUsageFlags,
-    queue_family: Queue_Family,
     initial_layout: vk.ImageLayout,
     alloc_flags: vma.Allocation_Create_Flags,
 }
@@ -1062,7 +1061,7 @@ Image :: struct {
 Image_Upload :: struct {
     width: u32,
     height: u32,
-    bytes: []u8,
+    bytes: []byte,
     generate_mipmaps: bool
 }
 Image_Delete :: struct {
@@ -1082,13 +1081,6 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
 
     // }
 
-    qfi: u32
-    switch queue_family {
-        case .Graphics: qfi = gd.gfx_queue_family
-        case .Compute: qfi = gd.compute_queue_family
-        case .Transfer: qfi = gd.transfer_queue_family
-    }
-
     image: Image
     {
         info := vk.ImageCreateInfo {
@@ -1105,7 +1097,7 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
             usage = usage,
             sharingMode = .EXCLUSIVE,
             queueFamilyIndexCount = 1,
-            pQueueFamilyIndices = &qfi,
+            pQueueFamilyIndices = &gd.gfx_queue_family,
             initialLayout = initial_layout
         }
         alloc_info := vma.Allocation_Create_Info {
@@ -1168,110 +1160,113 @@ get_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (^Image, bool) 
 
 // Blocking function for writing to a GPU image
 // Use when the data is small or if you don't care about stalling
-sync_write_image :: proc(gd: ^Graphics_Device, image_handle: Image_Handle, using info: ^Image_Upload) -> bool {
-    cb := gd.transfer_command_buffers[in_flight_idx(gd)]
-    out_image := hm.get(&gd.images, hm.Handle(image_handle)) or_return
-    semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+// sync_create_image_with_data :: proc(
+//     gd: ^Graphics_Device,
+//     using create_info: ^Image_Create,
+//     using upload_info: ^Image_Upload
+// ) -> (out_handle: Image_Handle, ok: bool) {
+//     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
+//     semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
 
-    // Staging buffer
-    sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
-    sb_ptr := sb.alloc_info.mapped_data
+//     // Staging buffer
+//     sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
+//     sb_ptr := sb.alloc_info.mapped_data
 
-    bytes_size := len(bytes)
-    assert(bytes_size <= STAGING_BUFFER_SIZE, "Image too big for staging buffer. Nick stop being lazy.")
-    amount_transferred := 0
+//     bytes_size := len(bytes)
+//     assert(bytes_size <= STAGING_BUFFER_SIZE, "Image too big for staging buffer. Nick, stop being lazy.")
+//     amount_transferred := 0
 
-    for amount_transferred < bytes_size {
-        iter_size := min(bytes_size - amount_transferred, STAGING_BUFFER_SIZE)
+//     for amount_transferred < bytes_size {
+//         iter_size := min(bytes_size - amount_transferred, STAGING_BUFFER_SIZE)
 
-        // Copy data to staging buffer
-        p := raw_data(bytes[amount_transferred:])
-        mem.copy(sb_ptr, p, iter_size)
+//         // Copy data to staging buffer
+//         p := raw_data(bytes[amount_transferred:])
+//         mem.copy(sb_ptr, p, iter_size)
 
-        // Begin transfer command buffer
-        begin_info := vk.CommandBufferBeginInfo {
-            sType = .COMMAND_BUFFER_BEGIN_INFO,
-            pNext = nil,
-            flags = {.ONE_TIME_SUBMIT},
-            pInheritanceInfo = nil
-        }
-        vk.BeginCommandBuffer(cb, &begin_info)
+//         // Begin transfer command buffer
+//         begin_info := vk.CommandBufferBeginInfo {
+//             sType = .COMMAND_BUFFER_BEGIN_INFO,
+//             pNext = nil,
+//             flags = {.ONE_TIME_SUBMIT},
+//             pInheritanceInfo = nil
+//         }
+//         vk.BeginCommandBuffer(cb, &begin_info)
 
-        image_copy := vk.BufferImageCopy {
-            bufferOffset = vk.DeviceSize(amount_transferred),
-            bufferRowLength = 0,
-            bufferImageHeight = 0,
-            imageSubresource = {
-                aspectMask = {.COLOR},
-                mipLevel = 0,
-                baseArrayLayer = 0,
-                layerCount = 1
-            },
-            imageOffset = {
-                x = 0,
-                y = 0,
-                z = 0
-            },
-            imageExtent = {
-                width = width,
-                height = height
-            }
-        }
-        vk.CmdCopyBufferToImage(cb, sb.buffer, out_image.image, .TRANSFER_DST_OPTIMAL, 1, &image_copy)
-        vk.EndCommandBuffer(cb)
+//         image_copy := vk.BufferImageCopy {
+//             bufferOffset = vk.DeviceSize(amount_transferred),
+//             bufferRowLength = 0,
+//             bufferImageHeight = 0,
+//             imageSubresource = {
+//                 aspectMask = {.COLOR},
+//                 mipLevel = 0,
+//                 baseArrayLayer = 0,
+//                 layerCount = 1
+//             },
+//             imageOffset = {
+//                 x = 0,
+//                 y = 0,
+//                 z = 0
+//             },
+//             imageExtent = {
+//                 width = width,
+//                 height = height
+//             }
+//         }
+//         vk.CmdCopyBufferToImage(cb, sb.buffer, out_image.image, .TRANSFER_DST_OPTIMAL, 1, &image_copy)
+//         vk.EndCommandBuffer(cb)
 
-        // Actually submit this lonesome command to the transfer queue
-        cb_info := vk.CommandBufferSubmitInfo {
-            sType = .COMMAND_BUFFER_SUBMIT_INFO,
-            pNext = nil,
-            commandBuffer = cb,
-            deviceMask = 0
-        }
+//         // Actually submit this lonesome command to the transfer queue
+//         cb_info := vk.CommandBufferSubmitInfo {
+//             sType = .COMMAND_BUFFER_SUBMIT_INFO,
+//             pNext = nil,
+//             commandBuffer = cb,
+//             deviceMask = 0
+//         }
 
-        // Increment transfer timeline counter
-        new_timeline_value := gd.transfers_completed + 1
-        signal_info := vk.SemaphoreSubmitInfo {
-            sType = .SEMAPHORE_SUBMIT_INFO,
-            pNext = nil,
-            semaphore = semaphore^,
-            value = new_timeline_value,
-            stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
-            deviceIndex = 0
-        }
+//         // Increment transfer timeline counter
+//         new_timeline_value := gd.transfers_completed + 1
+//         signal_info := vk.SemaphoreSubmitInfo {
+//             sType = .SEMAPHORE_SUBMIT_INFO,
+//             pNext = nil,
+//             semaphore = semaphore^,
+//             value = new_timeline_value,
+//             stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+//             deviceIndex = 0
+//         }
 
-        submit_info := vk.SubmitInfo2 {
-            sType = .SUBMIT_INFO_2,
-            pNext = nil,
-            flags = nil,
-            commandBufferInfoCount = 1,
-            pCommandBufferInfos = &cb_info,
-            signalSemaphoreInfoCount = 1,
-            pSignalSemaphoreInfos = &signal_info
-        }
-        if vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
-            log.error("Failed to submit to transfer queue.")
-        }
+//         submit_info := vk.SubmitInfo2 {
+//             sType = .SUBMIT_INFO_2,
+//             pNext = nil,
+//             flags = nil,
+//             commandBufferInfoCount = 1,
+//             pCommandBufferInfos = &cb_info,
+//             signalSemaphoreInfoCount = 1,
+//             pSignalSemaphoreInfos = &signal_info
+//         }
+//         if vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
+//             log.error("Failed to submit to transfer queue.")
+//         }
 
-        // CPU wait
-        wait_info := vk.SemaphoreWaitInfo {
-            sType = .SEMAPHORE_WAIT_INFO,
-            pNext = nil,
-            flags = nil,
-            semaphoreCount = 1,
-            pSemaphores = semaphore,
-            pValues = &new_timeline_value
-        }
-        if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
-            log.error("Failed to wait for transfer semaphore.")
-        }
-        log.debugf("Transferred %v bytes of image data to image handle %v", iter_size, out_image)
+//         // CPU wait
+//         wait_info := vk.SemaphoreWaitInfo {
+//             sType = .SEMAPHORE_WAIT_INFO,
+//             pNext = nil,
+//             flags = nil,
+//             semaphoreCount = 1,
+//             pSemaphores = semaphore,
+//             pValues = &new_timeline_value
+//         }
+//         if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
+//             log.error("Failed to wait for transfer semaphore.")
+//         }
+//         log.debugf("Transferred %v bytes of image data to image handle %v", iter_size, out_image)
 
-        gd.transfers_completed += 1
-        amount_transferred += iter_size
-    }
+//         gd.transfers_completed += 1
+//         amount_transferred += iter_size
+//     }
 
-    return true
-}
+//     return true
+// }
 
 delete_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> bool {
     image := hm.get(&gd.images, hm.Handle(handle)) or_return
