@@ -38,6 +38,7 @@ Format :: vk.Format
 Offset2D :: vk.Offset2D
 Extent2D :: vk.Extent2D
 ImageSubresourceRange :: vk.ImageSubresourceRange
+DrawIndexedIndirectCommand :: vk.DrawIndexedIndirectCommand
 
 Queue_Family :: enum {
     Graphics,
@@ -137,7 +138,8 @@ Graphics_Device :: struct {
     pipelines: hm.Handle_Map(vk.Pipeline),
 
     // Deletion queues for Buffers and Images
-    buffer_deletes: queue.Queue(Buffer_Delete)
+    buffer_deletes: queue.Queue(Buffer_Delete),
+    image_deletes: queue.Queue(Image_Delete),
     
 }
 
@@ -930,7 +932,7 @@ get_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> (^Buffer, boo
 
 // Blocking function for writing to a GPU buffer
 // Use when the data is small or if you don't care about stalling
-sync_write_buffer :: proc(gd: ^Graphics_Device, in_bytes: []u8, out_buffer: Buffer_Handle) -> bool {
+sync_write_buffer :: proc(gd: ^Graphics_Device, out_buffer: Buffer_Handle, in_bytes: []u8) -> bool {
     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
     out_buf := hm.get(&gd.buffers, hm.Handle(out_buffer)) or_return
     semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
@@ -1034,13 +1036,7 @@ delete_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> bool {
     return true
 }
 
-Image :: struct {
-    image: vk.Image,
-    image_view: vk.ImageView,
-    allocation: vma.Allocation,
-    alloc_info: vma.Allocation_Info
-}
-Image_Info :: struct {
+Image_Create :: struct {
     flags: vk.ImageCreateFlags,
     image_type: vk.ImageType,
     format: vk.Format,
@@ -1054,16 +1050,34 @@ Image_Info :: struct {
     initial_layout: vk.ImageLayout,
     alloc_flags: vma.Allocation_Create_Flags,
 }
+Image :: struct {
+    image: vk.Image,
+    image_view: vk.ImageView,
+    allocation: vma.Allocation,
+    alloc_info: vma.Allocation_Info
+}
+Image_Upload :: struct {
+    width: u32,
+    height: u32,
+    bytes: []u8,
+    generate_mipmaps: bool
+}
+Image_Delete :: struct {
+    death_frame: u64,
+    image: vk.Image,
+    image_view: vk.ImageView,
+    allocation: vma.Allocation
+}
 
-create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Info) -> Image_Handle {
+create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> Image_Handle {
     // Calculate mipmap count
     mip_count := 1
-    if has_mipmaps {
-        // Mipmaps are only for 2D images at least rn
-        assert(image_type == .D2)
+    // if has_mipmaps {
+    //     // Mipmaps are only for 2D images at least rn
+    //     assert(image_type == .D2)
 
 
-    }
+    // }
 
     qfi: u32
     switch queue_family {
@@ -1147,6 +1161,128 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Info) -> Ima
 
 get_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (^Image, bool) {
     return hm.get(&gd.images, hm.Handle(handle))
+}
+
+// Blocking function for writing to a GPU image
+// Use when the data is small or if you don't care about stalling
+sync_write_image :: proc(gd: ^Graphics_Device, image_handle: Image_Handle, using info: ^Image_Upload) -> bool {
+    cb := gd.transfer_command_buffers[in_flight_idx(gd)]
+    out_image := hm.get(&gd.images, hm.Handle(image_handle)) or_return
+    semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+
+    // Staging buffer
+    sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
+    sb_ptr := sb.alloc_info.mapped_data
+
+    bytes_size := len(bytes)
+    assert(bytes_size <= STAGING_BUFFER_SIZE, "Image too big for staging buffer. Nick stop being lazy.")
+    amount_transferred := 0
+
+    for amount_transferred < bytes_size {
+        iter_size := min(bytes_size - amount_transferred, STAGING_BUFFER_SIZE)
+
+        // Copy data to staging buffer
+        p := raw_data(bytes[amount_transferred:])
+        mem.copy(sb_ptr, p, iter_size)
+
+        // Begin transfer command buffer
+        begin_info := vk.CommandBufferBeginInfo {
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            pNext = nil,
+            flags = {.ONE_TIME_SUBMIT},
+            pInheritanceInfo = nil
+        }
+        vk.BeginCommandBuffer(cb, &begin_info)
+
+        image_copy := vk.BufferImageCopy {
+            bufferOffset = vk.DeviceSize(amount_transferred),
+            bufferRowLength = 0,
+            bufferImageHeight = 0,
+            imageSubresource = {
+                aspectMask = {.COLOR},
+                mipLevel = 0,
+                baseArrayLayer = 0,
+                layerCount = 1
+            },
+            imageOffset = {
+                x = 0,
+                y = 0,
+                z = 0
+            },
+            imageExtent = {
+                width = width,
+                height = height
+            }
+        }
+        vk.CmdCopyBufferToImage(cb, sb.buffer, out_image.image, .TRANSFER_DST_OPTIMAL, 1, &image_copy)
+        vk.EndCommandBuffer(cb)
+
+        // Actually submit this lonesome command to the transfer queue
+        cb_info := vk.CommandBufferSubmitInfo {
+            sType = .COMMAND_BUFFER_SUBMIT_INFO,
+            pNext = nil,
+            commandBuffer = cb,
+            deviceMask = 0
+        }
+
+        // Increment transfer timeline counter
+        new_timeline_value := gd.transfers_completed + 1
+        signal_info := vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            pNext = nil,
+            semaphore = semaphore^,
+            value = new_timeline_value,
+            stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+            deviceIndex = 0
+        }
+
+        submit_info := vk.SubmitInfo2 {
+            sType = .SUBMIT_INFO_2,
+            pNext = nil,
+            flags = nil,
+            commandBufferInfoCount = 1,
+            pCommandBufferInfos = &cb_info,
+            signalSemaphoreInfoCount = 1,
+            pSignalSemaphoreInfos = &signal_info
+        }
+        if vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
+            log.error("Failed to submit to transfer queue.")
+        }
+
+        // CPU wait
+        wait_info := vk.SemaphoreWaitInfo {
+            sType = .SEMAPHORE_WAIT_INFO,
+            pNext = nil,
+            flags = nil,
+            semaphoreCount = 1,
+            pSemaphores = semaphore,
+            pValues = &new_timeline_value
+        }
+        if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
+            log.error("Failed to wait for transfer semaphore.")
+        }
+        log.debugf("Transferred %v bytes of image data to image handle %v", iter_size, out_image)
+
+        gd.transfers_completed += 1
+        amount_transferred += iter_size
+    }
+
+    return true
+}
+
+delete_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> bool {
+    image := hm.get(&gd.images, hm.Handle(handle)) or_return
+
+    image_delete := Image_Delete {
+        death_frame = gd.frame_count + u64(gd.frames_in_flight),
+        image = image.image,
+        image_view = image.image_view,
+        allocation = image.allocation
+    }
+    queue.append(&gd.image_deletes, image_delete)
+    hm.remove(&gd.images, hm.Handle(handle))
+    
+    return true
 }
 
 tick_deletion_queues :: proc(gd: ^Graphics_Device) {
@@ -1392,6 +1528,14 @@ cmd_set_scissor :: proc(
     vk.CmdSetScissor(cb, first_scissor, u32(len(scissors)), raw_data(scissors))
 }
 
+cmd_bind_index_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, buffer: Buffer_Handle) -> bool {
+    cb := gd.gfx_command_buffers[cb_idx]
+    b := hm.get(&gd.buffers, hm.Handle(buffer)) or_return
+    vk.CmdBindIndexBuffer(cb, b.buffer, 0, .UINT16)
+
+    return true
+}
+
 cmd_draw_indexed_indirect :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
@@ -1401,7 +1545,13 @@ cmd_draw_indexed_indirect :: proc(
 ) -> bool {
     cb := gd.gfx_command_buffers[cb_idx]
     draw_buffer := hm.get(&gd.buffers, hm.Handle(draw_buffer_handle)) or_return
-    vk.CmdDrawIndexedIndirect(cb, draw_buffer.buffer, vk.DeviceSize(offset), draw_count, size_of(vk.DrawIndexedIndirectCommand))
+    vk.CmdDrawIndexedIndirect(
+        cb,
+        draw_buffer.buffer,
+        vk.DeviceSize(offset),
+        draw_count,
+        size_of(vk.DrawIndexedIndirectCommand)
+    )
 
     return true
 }
