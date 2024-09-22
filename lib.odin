@@ -39,6 +39,7 @@ uint2 :: [2]u32
 Format :: vk.Format
 Offset2D :: vk.Offset2D
 Extent2D :: vk.Extent2D
+vkImage :: vk.Image
 ImageSubresourceRange :: vk.ImageSubresourceRange
 DrawIndexedIndirectCommand :: vk.DrawIndexedIndirectCommand
 
@@ -138,6 +139,10 @@ Graphics_Device :: struct {
     images: hm.Handle_Map(Image),
     semaphores: hm.Handle_Map(vk.Semaphore),
     pipelines: hm.Handle_Map(vk.Pipeline),
+
+    // Queue for images who's data has been uploaded
+    // but which haven't been transferred to the gfx queue
+    pending_images: queue.Queue(Pending_Image),
 
     // Deletion queues for Buffers and Images
     buffer_deletes: queue.Queue(Buffer_Delete),
@@ -267,32 +272,27 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             // @TODO: Do something more sophisticated than picking the first DISCRETE_GPU
             if props.properties.deviceType == .DISCRETE_GPU {
                 // Check physical device features
+                vulkan_12_features: vk.PhysicalDeviceVulkan12Features
                 dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures
-                timeline_features: vk.PhysicalDeviceTimelineSemaphoreFeatures
                 sync2_features: vk.PhysicalDeviceSynchronization2Features
-                bda_features: vk.PhysicalDeviceBufferDeviceAddressFeatures
 
+                vulkan_12_features.sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
                 dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
-                timeline_features.sType = .PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES
                 sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
-                bda_features.sType = .PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
                 features.sType = .PHYSICAL_DEVICE_FEATURES_2
 
-                timeline_features.pNext = &dynamic_rendering_features
-                sync2_features.pNext = &timeline_features
-                bda_features.pNext = &sync2_features
-                features.pNext = &bda_features
+                dynamic_rendering_features.pNext = &vulkan_12_features
+                sync2_features.pNext = &dynamic_rendering_features
+                features.pNext = &sync2_features
                 vk.GetPhysicalDeviceFeatures2(pd, &features)
-                log.debugf("%#v", features)
-                log.debugf("%#v", dynamic_rendering_features)
-                log.debugf("%#v", timeline_features)
-                log.debugf("%#v", bda_features)
 
                 has_right_features :=
+                    vulkan_12_features.descriptorIndexing &&
+                    vulkan_12_features.runtimeDescriptorArray &&
+                    vulkan_12_features.timelineSemaphore &&
+                    vulkan_12_features.bufferDeviceAddress && 
                     dynamic_rendering_features.dynamicRendering &&
-                    bda_features.bufferDeviceAddress && 
-                    sync2_features.synchronization2 &&
-                    timeline_features.timelineSemaphore
+                    sync2_features.synchronization2 
                 if has_right_features {
                     phys_device = pd
                     log.infof("Chosen GPU: %s", string(props.properties.deviceName[:]))
@@ -1042,7 +1042,6 @@ Image_Create :: struct {
     samples: vk.SampleCountFlags,
     tiling: vk.ImageTiling,
     usage: vk.ImageUsageFlags,
-    initial_layout: vk.ImageLayout,
     alloc_flags: vma.Allocation_Create_Flags,
 }
 Image :: struct {
@@ -1056,6 +1055,11 @@ Image_Delete :: struct {
     image: vk.Image,
     image_view: vk.ImageView,
     allocation: vma.Allocation
+}
+Pending_Image :: struct {
+    image: vk.Image,
+    view: vk.ImageView,
+    layout: vk.ImageLayout
 }
 
 create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> Image_Handle {
@@ -1097,7 +1101,7 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
             sharingMode = .EXCLUSIVE,
             queueFamilyIndexCount = 1,
             pQueueFamilyIndices = &gd.gfx_queue_family,
-            initialLayout = initial_layout
+            initialLayout = .UNDEFINED
         }
         alloc_info := vma.Allocation_Create_Info {
             flags = alloc_flags,
@@ -1157,6 +1161,11 @@ get_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (^Image, bool) 
     return hm.get(&gd.images, hm.Handle(handle))
 }
 
+get_image_vkhandle :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (h: vkImage, ok: bool) {
+    im := hm.get(&gd.images, hm.Handle(handle)) or_return
+    return im.image, true
+}
+
 // Blocking function for writing to a GPU image
 // Use when the data is small or if you don't care about stalling
 sync_create_image_with_data :: proc(
@@ -1203,6 +1212,29 @@ sync_create_image_with_data :: proc(
         }
         vk.BeginCommandBuffer(cb, &begin_info)
 
+        // Record image layout transition on first iteration
+        if amount_transferred == 0 {
+            barriers := []Image_Barrier {
+                {
+                    src_stage_mask = {},
+                    src_access_mask = {},
+                    dst_stage_mask = {.TRANSFER},
+                    dst_access_mask = {.TRANSFER_WRITE},
+                    old_layout = .UNDEFINED,
+                    new_layout = .TRANSFER_DST_OPTIMAL,
+                    image = out_image.image,
+                    subresource_range = {
+                        aspectMask = {.COLOR},
+                        baseMipLevel = 0,
+                        levelCount = 1,
+                        baseArrayLayer = 0,
+                        layerCount = 1
+                    }
+                }
+            }
+            cmd_transfer_pipeline_barrier(gd, cb_idx, barriers)
+        }
+
         image_copy := vk.BufferImageCopy {
             bufferOffset = vk.DeviceSize(amount_transferred),
             bufferRowLength = 0,
@@ -1233,13 +1265,13 @@ sync_create_image_with_data :: proc(
                 {
                     src_stage_mask = {.TRANSFER},
                     src_access_mask = {.TRANSFER_WRITE},
-                    dst_stage_mask = {.ALL_GRAPHICS},
-                    dst_access_mask = {.SHADER_READ},
+                    //dst_stage_mask = {.ALL_GRAPHICS}, Ignored during release operation
+                    //dst_access_mask = {.SHADER_READ}, Ignored during release operation
                     old_layout = .TRANSFER_DST_OPTIMAL,
                     new_layout = .SHADER_READ_ONLY_OPTIMAL,
                     src_queue_family = gd.transfer_queue_family,
                     dst_queue_family = gd.gfx_queue_family,
-                    image_handle = out_handle,
+                    image = out_image.image,
                     subresource_range = {
                         aspectMask = {.COLOR},
                         baseMipLevel = 0,
@@ -1249,7 +1281,7 @@ sync_create_image_with_data :: proc(
                     }
                 }
             }
-            cmd_pipeline_barrier(gd, cb_idx, barriers)
+            cmd_transfer_pipeline_barrier(gd, cb_idx, barriers)
         }
 
         vk.EndCommandBuffer(cb)
@@ -1304,7 +1336,11 @@ sync_create_image_with_data :: proc(
         amount_transferred += iter_size
     }
 
-    // @TODO: Generate mipmaps
+    queue.push_back(&gd.pending_images, Pending_Image {
+        image = out_image.image,
+        view = out_image.image_view,
+        layout = .SHADER_READ_ONLY_OPTIMAL
+    })
 
     ok = true
     return
@@ -1336,30 +1372,65 @@ tick_subsystems :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
 
     // @TODO: Process image delete queue
 
+    d_image_infos: [dynamic]vk.DescriptorImageInfo
+    defer delete(d_image_infos)
+    d_writes: [dynamic]vk.WriteDescriptorSet
+    defer delete(d_writes)
+    
+    current_image_idx := 0
+
     // Record queue family ownership transfer for in-flight images
     {
-        // barriers := []Image_Barrier {
-        //     {
-        //         src_stage_mask = {.TRANSFER},
-        //         src_access_mask = {.TRANSFER_WRITE},
-        //         dst_stage_mask = {.ALL_GRAPHICS},
-        //         dst_access_mask = {.SHADER_READ},
-        //         old_layout = .TRANSFER_DST_OPTIMAL,
-        //         new_layout = .SHADER_READ_ONLY_OPTIMAL,
-        //         src_queue_family = gd.transfer_queue_family,
-        //         dst_queue_family = gd.gfx_queue_family,
-        //         image_handle = out_handle,
-        //         subresource_range = {
-        //             aspectMask = {.COLOR},
-        //             baseMipLevel = 0,
-        //             levelCount = 1,
-        //             baseArrayLayer = 0,
-        //             layerCount = 1
-        //         }
-        //     }
-        // }
-        // cmd_pipeline_barrier(gd, cb_idx, barriers)
+        write_ct := 0
+        for queue.len(gd.pending_images) > 0 {
+            using iter_image := queue.pop_front(&gd.pending_images)
+            
+            barriers := []Image_Barrier {
+                {
+                    //src_stage_mask = {.TRANSFER},             Ignored in acquire operation
+                    //src_access_mask = {.TRANSFER_WRITE},      Ignored in acquire operation
+                    dst_stage_mask = {.ALL_GRAPHICS},
+                    dst_access_mask = {.SHADER_READ},
+                    old_layout = .TRANSFER_DST_OPTIMAL,
+                    new_layout = .SHADER_READ_ONLY_OPTIMAL,
+                    src_queue_family = gd.transfer_queue_family,
+                    dst_queue_family = gd.gfx_queue_family,
+                    image = image,
+                    subresource_range = {
+                        aspectMask = {.COLOR},
+                        baseMipLevel = 0,
+                        levelCount = 1,
+                        baseArrayLayer = 0,
+                        layerCount = 1
+                    }
+                }
+            }
+            cmd_gfx_pipeline_barrier(gd, cb_idx, barriers)
+
+            // @TODO: Record mipmap generation commands
+
+            // Save descriptor update data
+            for gd.images.values[current_image_idx].image_view != iter_image.view do current_image_idx += 1
+            append(&d_image_infos, vk.DescriptorImageInfo {
+                imageView = view,
+                imageLayout = .SHADER_READ_ONLY_OPTIMAL
+            })
+            append(&d_writes, vk.WriteDescriptorSet {
+                sType = .WRITE_DESCRIPTOR_SET,
+                pNext = nil,
+                dstSet = gd.descriptor_set,
+                dstBinding = IMAGES_DESCRIPTOR_BINDING,
+                dstArrayElement = u32(current_image_idx),
+                descriptorCount = 1,
+                descriptorType = .SAMPLED_IMAGE,
+                pImageInfo = &d_image_infos[write_ct]
+            })
+            write_ct += 1
+        }
     }
+
+    // Update sampled image descriptors
+    if len(d_writes) > 0 do vk.UpdateDescriptorSets(gd.device, u32(len(d_writes)), &d_writes[0], 0, nil)
 }
 
 acquire_swapchain_image :: proc(gd: ^Graphics_Device, out_image_idx: ^u32) -> bool {
@@ -1548,6 +1619,11 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
     vk.CmdBeginRenderingKHR(cb, &info)
 }
 
+cmd_bind_descriptor_set :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+    cb := gd.gfx_command_buffers[cb_idx]
+    vk.CmdBindDescriptorSets(cb, .GRAPHICS, gd.pipeline_layout, 0, 1, &gd.descriptor_set, 0, nil)
+}
+
 cmd_bind_pipeline :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
@@ -1684,13 +1760,13 @@ Image_Barrier :: struct {
     new_layout: vk.ImageLayout,
     src_queue_family: u32,
     dst_queue_family: u32,
-    image_handle: Image_Handle,
+    image: vkImage,
     subresource_range: vk.ImageSubresourceRange
 }
 
 // Inserts an arbitrary number of memory barriers
-// into the command buffer at this point
-cmd_pipeline_barrier :: proc(
+// into the gfx command buffer at this point
+cmd_gfx_pipeline_barrier :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
     image_barriers: []Image_Barrier
@@ -1703,7 +1779,6 @@ cmd_pipeline_barrier :: proc(
     for barrier in image_barriers {
         using barrier
 
-        im := hm.get(&gd.images, hm.Handle(image_handle)) or_continue   // @TODO: Should this really be or_continue?
         append(
             &im_barriers,
             vk.ImageMemoryBarrier2 {
@@ -1717,7 +1792,55 @@ cmd_pipeline_barrier :: proc(
                 newLayout = new_layout,
                 srcQueueFamilyIndex = src_queue_family,
                 dstQueueFamilyIndex = dst_queue_family,
-                image = im.image,
+                image = image,
+                subresourceRange = subresource_range
+            }
+        )
+    }
+
+    info := vk.DependencyInfo {
+        sType = .DEPENDENCY_INFO,
+        pNext = nil,
+        dependencyFlags = nil,
+        memoryBarrierCount = 0,
+        pMemoryBarriers = nil,
+        bufferMemoryBarrierCount = 0,
+        pBufferMemoryBarriers = nil,
+        imageMemoryBarrierCount = u32(len(im_barriers)),
+        pImageMemoryBarriers = raw_data(im_barriers)
+    }
+    vk.CmdPipelineBarrier2KHR(cb, &info)
+}
+
+// Inserts an arbitrary number of memory barriers
+// into the transfer command buffer at this point
+cmd_transfer_pipeline_barrier :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    image_barriers: []Image_Barrier
+) {
+    cb := gd.transfer_command_buffers[cb_idx]
+
+    im_barriers: [dynamic]vk.ImageMemoryBarrier2
+    defer delete(im_barriers)
+    reserve(&im_barriers, len(image_barriers))
+    for barrier in image_barriers {
+        using barrier
+
+        append(
+            &im_barriers,
+            vk.ImageMemoryBarrier2 {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                pNext = nil,
+                srcStageMask = src_stage_mask,
+                srcAccessMask = src_access_mask,
+                dstStageMask = dst_stage_mask,
+                dstAccessMask = dst_access_mask,
+                oldLayout = old_layout,
+                newLayout = new_layout,
+                srcQueueFamilyIndex = src_queue_family,
+                dstQueueFamilyIndex = dst_queue_family,
+                image = image,
                 subresourceRange = subresource_range
             }
         )
