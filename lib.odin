@@ -19,6 +19,11 @@ TOTAL_SAMPLERS :: 2
 IMAGES_DESCRIPTOR_BINDING :: 0
 SAMPLERS_DESCRIPTOR_BINDING :: 1
 
+Immutable_Samplers :: enum {
+    Aniso16 = 0,
+    Point = 1
+}
+
 // Sizes in bytes
 PUSH_CONSTANTS_SIZE :: 128
 STAGING_BUFFER_SIZE :: 128 * 1024 * 1024
@@ -64,9 +69,14 @@ Sync_Info :: struct {
     signal_ops: [dynamic]Semaphore_Op,
 }
 
-delete_sync_info :: proc(s: ^Sync_Info) {
-    delete(s.wait_ops)
-    delete(s.signal_ops)
+delete_sync_info :: proc(using s: ^Sync_Info) {
+    delete(wait_ops)
+    delete(signal_ops)
+}
+
+clear_sync_info :: proc(using s: ^Sync_Info) {
+    clear(&wait_ops)
+    clear(&signal_ops)
 }
 
 // Distinct handle types for each Handle_Map in the Graphics_Device
@@ -468,6 +478,9 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
 
         if vk.WaitSemaphores == nil do vk.WaitSemaphores = vk.WaitSemaphoresKHR
         if vk.WaitSemaphoresKHR == nil do vk.WaitSemaphoresKHR = vk.WaitSemaphores
+
+        if vk.GetBufferDeviceAddress == nil do vk.GetBufferDeviceAddress = vk.GetBufferDeviceAddressKHR
+        if vk.GetBufferDeviceAddressKHR == nil do vk.GetBufferDeviceAddressKHR = vk.GetBufferDeviceAddress
     }
 
     // Initialize the Vulkan Memory Allocator
@@ -883,6 +896,7 @@ Buffer_Info :: struct {
 
 Buffer :: struct {
     buffer: vk.Buffer,
+    address: vk.DeviceAddress,
     allocation: vma.Allocation,
     alloc_info: vma.Allocation_Info
 }
@@ -901,7 +915,7 @@ create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Ha
         pNext = nil,
         flags = nil,
         size = buf_info.size,
-        usage = buf_info.usage,
+        usage = buf_info.usage + {.SHADER_DEVICE_ADDRESS},
         sharingMode = .CONCURRENT,          // @TODO: Actually evaluate if concurrent buffers on desktop are fine
         queueFamilyIndexCount = u32(len(qfis)),
         pQueueFamilyIndices = raw_data(qfis[:])
@@ -918,6 +932,14 @@ create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Ha
     if r != .SUCCESS {
         log.errorf("Failed to create buffer: %v", r)
     }
+
+    bda_info := vk.BufferDeviceAddressInfo {
+        sType = .BUFFER_DEVICE_ADDRESS_INFO,
+        pNext = nil,
+        buffer = b.buffer
+    }
+    b.address = vk.GetBufferDeviceAddressKHR(gd.device, &bda_info)
+
     return Buffer_Handle(hm.insert(&gd.buffers, b))
 }
 
@@ -927,7 +949,13 @@ get_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> (^Buffer, boo
 
 // Blocking function for writing to a GPU buffer
 // Use when the data is small or if you don't care about stalling
-sync_write_buffer :: proc($Element_Type: typeid, gd: ^Graphics_Device, out_buffer: Buffer_Handle, in_slice: []Element_Type) -> bool {
+sync_write_buffer :: proc(
+    $Element_Type: typeid,
+    gd: ^Graphics_Device,
+    out_buffer: Buffer_Handle,
+    in_slice: []Element_Type
+) -> bool {
+    
     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
     out_buf := hm.get(&gd.buffers, hm.Handle(out_buffer)) or_return
     semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
@@ -1170,6 +1198,7 @@ get_image_vkhandle :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (h: vk
 // Use when the data is small or if you don't care about stalling
 sync_create_image_with_data :: proc(
     gd: ^Graphics_Device,
+    sync_info: ^Sync_Info,
     using create_info: ^Image_Create,
     bytes: []byte
 ) -> (out_handle: Image_Handle, ok: bool) {
@@ -1444,10 +1473,10 @@ acquire_swapchain_image :: proc(gd: ^Graphics_Device, out_image_idx: ^u32) -> bo
     return true
 }
 
-present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: u32) -> bool {
-    image_idx := image_idx
+present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> bool {
     idx := in_flight_idx(gd)
     sem := get_semaphore(gd, gd.present_semaphores[idx]) or_return
+    info_res: vk.Result
     info := vk.PresentInfoKHR {
         sType = .PRESENT_INFO_KHR,
         pNext = nil,
@@ -1455,11 +1484,15 @@ present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: u32) -> bool {
         pWaitSemaphores = sem,
         swapchainCount = 1,
         pSwapchains = &gd.swapchain,
-        pImageIndices = &image_idx,
-        pResults = nil
+        pImageIndices = image_idx,
+        pResults = &info_res
     }
     if vk.QueuePresentKHR(gd.gfx_queue, &info) != .SUCCESS {
         log.error("Failed to present swapchain image.")
+        return false
+    }
+    if info_res != .SUCCESS {
+        log.error("Queue present individual failure.")
         return false
     }
     return true
@@ -1670,10 +1703,10 @@ cmd_set_scissor :: proc(
     vk.CmdSetScissor(cb, first_scissor, u32(len(scissors)), raw_data(scissors))
 }
 
-cmd_push_constants_gfx :: proc($Element_Type: typeid, gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, in_slice: []Element_Type) {
+cmd_push_constants_gfx :: proc($Struct_Type: typeid, gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, in_struct: ^Struct_Type) {
     cb := gd.gfx_command_buffers[cb_idx]
-    byte_count : u32 = u32(len(in_slice) * size_of(Element_Type))
-    vk.CmdPushConstants(cb, gd.pipeline_layout, {.VERTEX,.FRAGMENT}, 0, byte_count, raw_data(in_slice));
+    byte_count : u32 = u32(size_of(Struct_Type))
+    vk.CmdPushConstants(cb, gd.pipeline_layout, {.VERTEX,.FRAGMENT}, 0, byte_count, in_struct);
 }
 
 cmd_bind_index_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, buffer: Buffer_Handle) -> bool {
