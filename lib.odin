@@ -35,18 +35,12 @@ IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
     a = .A,
 }
 
-float2 :: [2]f32
-float3 :: [3]f32
-float4 :: [4]f32
-int2 :: [2]i32
-uint2 :: [2]u32
-
-Format :: vk.Format
-Offset2D :: vk.Offset2D
-Extent2D :: vk.Extent2D
-vkImage :: vk.Image
-ImageSubresourceRange :: vk.ImageSubresourceRange
-DrawIndexedIndirectCommand :: vk.DrawIndexedIndirectCommand
+float2   :: [2]f32
+float3   :: [3]f32
+float4   :: [4]f32
+float4x4 :: [4][4]f32
+int2     :: [2]i32
+uint2    :: [2]u32
 
 Queue_Family :: enum {
     Graphics,
@@ -664,9 +658,17 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         }
         bindings : []vk.DescriptorSetLayoutBinding = {image_binding, sampler_binding}
 
+        binding_flags : vk.DescriptorBindingFlags = {.PARTIALLY_BOUND,.UPDATE_AFTER_BIND}
+        binding_flags_plural : []vk.DescriptorBindingFlags = {binding_flags,binding_flags}
+        binding_flags_info := vk.DescriptorSetLayoutBindingFlagsCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+            pNext = nil,
+            bindingCount = 2,
+            pBindingFlags = &binding_flags_plural[0]
+        }
         layout_info := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            pNext = nil,
+            pNext = &binding_flags_info,
             flags = {.UPDATE_AFTER_BIND_POOL},
             bindingCount = 2,
             pBindings = raw_data(bindings[:])
@@ -1043,6 +1045,27 @@ sync_write_buffer :: proc(
         bytes_transferred += iter_size
     }
 
+    // Add wait op to sync_info, or update
+    // the wait value if this timeline semaphore
+    // is already present
+    // {
+    //     sem_was_present := false
+    //     for &op in sync_info.wait_ops {
+    //         op_sem := get_semaphore(gd, op.semaphore) or_return
+    //         if op_sem^ == semaphore^ {
+    //             op.value = gd.transfers_completed
+    //             sem_was_present = true
+    //         }
+    //     }
+
+    //     if !sem_was_present {
+    //         append(&sync_info.wait_ops, Semaphore_Op {
+    //             semaphore = gd.transfer_timeline,
+    //             value = gd.transfers_completed
+    //         })
+    //     }
+    // }
+
     return true
 }
 
@@ -1189,7 +1212,7 @@ get_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (^Image, bool) 
     return hm.get(&gd.images, hm.Handle(handle))
 }
 
-get_image_vkhandle :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (h: vkImage, ok: bool) {
+get_image_vkhandle :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (h: vk.Image, ok: bool) {
     im := hm.get(&gd.images, hm.Handle(handle)) or_return
     return im.image, true
 }
@@ -1198,7 +1221,6 @@ get_image_vkhandle :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (h: vk
 // Use when the data is small or if you don't care about stalling
 sync_create_image_with_data :: proc(
     gd: ^Graphics_Device,
-    sync_info: ^Sync_Info,
     using create_info: ^Image_Create,
     bytes: []byte
 ) -> (out_handle: Image_Handle, ok: bool) {
@@ -1247,8 +1269,8 @@ sync_create_image_with_data :: proc(
                 {
                     src_stage_mask = {},
                     src_access_mask = {},
-                    dst_stage_mask = {.TRANSFER},
-                    dst_access_mask = {.TRANSFER_WRITE},
+                    dst_stage_mask = {.ALL_COMMANDS},
+                    dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
                     old_layout = .UNDEFINED,
                     new_layout = .TRANSFER_DST_OPTIMAL,
                     image = out_image.image,
@@ -1261,7 +1283,7 @@ sync_create_image_with_data :: proc(
                     }
                 }
             }
-            cmd_transfer_pipeline_barrier(gd, cb_idx, barriers)
+            cmd_transfer_pipeline_barriers(gd, cb_idx, barriers)
         }
 
         image_copy := vk.BufferImageCopy {
@@ -1292,8 +1314,8 @@ sync_create_image_with_data :: proc(
         if remaining_bytes <= STAGING_BUFFER_SIZE {
             barriers := []Image_Barrier {
                 {
-                    src_stage_mask = {.TRANSFER},
-                    src_access_mask = {.TRANSFER_WRITE},
+                    src_stage_mask = {.ALL_COMMANDS},
+                    src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
                     //dst_stage_mask = {.ALL_GRAPHICS}, Ignored during release operation
                     //dst_access_mask = {.SHADER_READ}, Ignored during release operation
                     old_layout = .TRANSFER_DST_OPTIMAL,
@@ -1310,7 +1332,7 @@ sync_create_image_with_data :: proc(
                     }
                 }
             }
-            cmd_transfer_pipeline_barrier(gd, cb_idx, barriers)
+            cmd_transfer_pipeline_barriers(gd, cb_idx, barriers)
         }
 
         vk.EndCommandBuffer(cb)
@@ -1365,6 +1387,30 @@ sync_create_image_with_data :: proc(
         amount_transferred += iter_size
     }
 
+    // Add wait op to sync_info, or update
+    // the wait value if this timeline semaphore
+    // is already present
+
+    // @TODO: Technically isn't necessary because the CPU-wait already
+    // defines an execution dependency
+    // {
+    //     sem_was_present := false
+    //     for &op in sync_info.wait_ops {
+    //         op_sem := get_semaphore(gd, op.semaphore) or_return
+    //         if op_sem^ == semaphore^ {
+    //             op.value = gd.transfers_completed
+    //             sem_was_present = true
+    //         }
+    //     }
+
+    //     if !sem_was_present {
+    //         append(&sync_info.wait_ops, Semaphore_Op {
+    //             semaphore = gd.transfer_timeline,
+    //             value = gd.transfers_completed
+    //         })
+    //     }
+    // }
+
     queue.push_back(&gd.pending_images, Pending_Image {
         image = out_image.image,
         view = out_image.image_view,
@@ -1399,7 +1445,13 @@ tick_subsystems :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
         vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
     }
 
-    // @TODO: Process image delete queue
+    // Process image delete queue
+    for queue.len(gd.image_deletes) > 0 && queue.peek_front(&gd.image_deletes).death_frame == gd.frame_count {
+        image := queue.pop_front(&gd.image_deletes)
+        log.debugf("Destroying image %s...", image.image)
+        vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
+        vma.destroy_image(gd.allocator, image.image, image.allocation)
+    }
 
     d_image_infos: [dynamic]vk.DescriptorImageInfo
     defer delete(d_image_infos)
@@ -1418,8 +1470,8 @@ tick_subsystems :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
                 {
                     //src_stage_mask = {.TRANSFER},             Ignored in acquire operation
                     //src_access_mask = {.TRANSFER_WRITE},      Ignored in acquire operation
-                    dst_stage_mask = {.ALL_GRAPHICS},
-                    dst_access_mask = {.SHADER_READ},
+                    dst_stage_mask = {.ALL_COMMANDS},
+                    dst_access_mask = {.MEMORY_READ, .MEMORY_WRITE},
                     old_layout = .TRANSFER_DST_OPTIMAL,
                     new_layout = .SHADER_READ_ONLY_OPTIMAL,
                     src_queue_family = gd.transfer_queue_family,
@@ -1434,7 +1486,7 @@ tick_subsystems :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
                     }
                 }
             }
-            cmd_gfx_pipeline_barrier(gd, cb_idx, barriers)
+            cmd_gfx_pipeline_barriers(gd, cb_idx, barriers)
 
             // @TODO: Record mipmap generation commands
 
@@ -1501,26 +1553,9 @@ present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> bool {
 
 CommandBuffer_Index :: distinct u32
 
-begin_gfx_command_buffer :: proc(gd: ^Graphics_Device, cpu_wait: ^Semaphore_Op) -> CommandBuffer_Index {
+begin_gfx_command_buffer :: proc(gd: ^Graphics_Device) -> CommandBuffer_Index {
     cb_idx := gd.next_gfx_command_buffer
     gd.next_gfx_command_buffer = (gd.next_gfx_command_buffer + 1) % gd.frames_in_flight
-
-    if cpu_wait.value > 0 {
-        sem, ok := hm.get(&gd.semaphores, hm.Handle(cpu_wait.semaphore))
-        if !ok do log.error("Couldn't find semaphore for CPU-sync")
-
-        info := vk.SemaphoreWaitInfo {
-            sType = .SEMAPHORE_WAIT_INFO,
-            pNext = nil,
-            flags = nil,
-            semaphoreCount = 1,
-            pSemaphores = sem,
-            pValues = &cpu_wait.value
-        }
-        if vk.WaitSemaphores(gd.device, &info, max(u64)) != .SUCCESS {
-            log.error("Failed to wait for timeline semaphore CPU-side man what")
-        }
-    }
 
     cb := gd.gfx_command_buffers[cb_idx]
     info := vk.CommandBufferBeginInfo {
@@ -1563,7 +1598,7 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
                 pNext = nil,
                 semaphore = sem^,
                 value = semaphore_ops[i].value,
-                stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+                stageMask = {.ALL_COMMANDS},    // @TODO: Is this heavy-handed or appropriate?
                 deviceIndex = 0
             }
         }
@@ -1572,9 +1607,13 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
 
     // Make semaphore submit infos
     wait_submit_infos: [dynamic]vk.SemaphoreSubmitInfoKHR
-    signal_submit_infos: [dynamic]vk.SemaphoreSubmitInfoKHR
     defer delete(wait_submit_infos)
+    resize(&wait_submit_infos, len(sync.wait_ops))
+    
+    signal_submit_infos: [dynamic]vk.SemaphoreSubmitInfoKHR
     defer delete(signal_submit_infos)
+    resize(&signal_submit_infos, len(sync.signal_ops))
+    
     build_submit_infos(gd, &wait_submit_infos, &sync.wait_ops)
     build_submit_infos(gd, &signal_submit_infos, &sync.signal_ops)
 
@@ -1793,13 +1832,13 @@ Image_Barrier :: struct {
     new_layout: vk.ImageLayout,
     src_queue_family: u32,
     dst_queue_family: u32,
-    image: vkImage,
+    image: vk.Image,
     subresource_range: vk.ImageSubresourceRange
 }
 
 // Inserts an arbitrary number of memory barriers
 // into the gfx command buffer at this point
-cmd_gfx_pipeline_barrier :: proc(
+cmd_gfx_pipeline_barriers :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
     image_barriers: []Image_Barrier
@@ -1847,7 +1886,7 @@ cmd_gfx_pipeline_barrier :: proc(
 
 // Inserts an arbitrary number of memory barriers
 // into the transfer command buffer at this point
-cmd_transfer_pipeline_barrier :: proc(
+cmd_transfer_pipeline_barriers :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
     image_barriers: []Image_Barrier
