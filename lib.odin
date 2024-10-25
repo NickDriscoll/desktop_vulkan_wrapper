@@ -1045,27 +1045,6 @@ sync_write_buffer :: proc(
         bytes_transferred += iter_size
     }
 
-    // Add wait op to sync_info, or update
-    // the wait value if this timeline semaphore
-    // is already present
-    // {
-    //     sem_was_present := false
-    //     for &op in sync_info.wait_ops {
-    //         op_sem := get_semaphore(gd, op.semaphore) or_return
-    //         if op_sem^ == semaphore^ {
-    //             op.value = gd.transfers_completed
-    //             sem_was_present = true
-    //         }
-    //     }
-
-    //     if !sem_was_present {
-    //         append(&sync_info.wait_ops, Semaphore_Op {
-    //             semaphore = gd.transfer_timeline,
-    //             value = gd.transfers_completed
-    //         })
-    //     }
-    // }
-
     return true
 }
 
@@ -1387,30 +1366,6 @@ sync_create_image_with_data :: proc(
         amount_transferred += iter_size
     }
 
-    // Add wait op to sync_info, or update
-    // the wait value if this timeline semaphore
-    // is already present
-
-    // @TODO: Technically isn't necessary because the CPU-wait already
-    // defines an execution dependency
-    // {
-    //     sem_was_present := false
-    //     for &op in sync_info.wait_ops {
-    //         op_sem := get_semaphore(gd, op.semaphore) or_return
-    //         if op_sem^ == semaphore^ {
-    //             op.value = gd.transfers_completed
-    //             sem_was_present = true
-    //         }
-    //     }
-
-    //     if !sem_was_present {
-    //         append(&sync_info.wait_ops, Semaphore_Op {
-    //             semaphore = gd.transfer_timeline,
-    //             value = gd.transfers_completed
-    //         })
-    //     }
-    // }
-
     queue.push_back(&gd.pending_images, Pending_Image {
         image = out_image.image,
         view = out_image.image_view,
@@ -1437,7 +1392,7 @@ delete_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> bool {
 }
 
 // General procedure for doing "per-frame" work
-tick_subsystems :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+begin_frame :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
     // Process buffer delete queue
     for queue.len(gd.buffer_deletes) > 0 && queue.peek_front(&gd.buffer_deletes).death_frame == gd.frame_count {
         buffer := queue.pop_front(&gd.buffer_deletes)
