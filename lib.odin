@@ -1615,8 +1615,7 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
         pNext = nil,
         imageView = iv.image_view,
         imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
-        //loadOp = .DONT_CARE,
-        loadOp = .CLEAR,
+        loadOp = .DONT_CARE,
         storeOp = .STORE,
         clearValue = vk.ClearValue {
             color = vk.ClearColorValue {
