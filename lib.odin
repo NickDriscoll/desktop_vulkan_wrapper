@@ -1039,7 +1039,6 @@ sync_write_buffer :: proc(
         if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
             log.error("Failed to wait for transfer semaphore.")
         }
-        log.debugf("Transferred %v bytes of buffer data to buffer handle %v", iter_size, out_buffer)
 
         gd.transfers_completed += 1
         bytes_transferred += iter_size
