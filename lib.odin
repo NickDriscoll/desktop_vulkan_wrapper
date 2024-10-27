@@ -1604,6 +1604,7 @@ Framebuffer :: struct {
     depth_image: Image_Handle,
     resolution: uint2,
     clear_color: float4,
+    color_load_op: vk.AttachmentLoadOp
 }
 
 cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
@@ -1615,7 +1616,7 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
         pNext = nil,
         imageView = iv.image_view,
         imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
-        loadOp = .DONT_CARE,
+        loadOp = framebuffer.color_load_op,
         storeOp = .STORE,
         clearValue = vk.ClearValue {
             color = vk.ClearColorValue {
@@ -1671,6 +1672,19 @@ cmd_draw :: proc(
 ) {
     cb := gd.gfx_command_buffers[cb_idx]
     vk.CmdDraw(cb, vtx_count, instance_count, first_vertex, first_instance)
+}
+
+cmd_draw_indexed :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    first_instance: u32
+) {
+    cb := gd.gfx_command_buffers[cb_idx]
+    vk.CmdDrawIndexed(cb, index_count, instance_count, first_index, vertex_offset, first_instance)
 }
 
 Viewport :: vk.Viewport
