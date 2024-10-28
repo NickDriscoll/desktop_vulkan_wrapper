@@ -19,7 +19,7 @@ TOTAL_SAMPLERS :: 2
 IMAGES_DESCRIPTOR_BINDING :: 0
 SAMPLERS_DESCRIPTOR_BINDING :: 1
 
-Immutable_Samplers :: enum {
+Immutable_Samplers :: enum u32 {
     Aniso16 = 0,
     Point = 1
 }
