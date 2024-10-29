@@ -955,7 +955,8 @@ sync_write_buffer :: proc(
     $Element_Type: typeid,
     gd: ^Graphics_Device,
     out_buffer: Buffer_Handle,
-    in_slice: []Element_Type
+    in_slice: []Element_Type,
+    base_offset : u32 = 0
 ) -> bool {
     
     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
@@ -989,7 +990,7 @@ sync_write_buffer :: proc(
         // Copy from staging buffer to actual buffer
         buffer_copy := vk.BufferCopy {
             srcOffset = 0,
-            dstOffset = vk.DeviceSize(bytes_transferred),
+            dstOffset = vk.DeviceSize(bytes_transferred) + vk.DeviceSize(base_offset),
             size = vk.DeviceSize(iter_size)
         }
         vk.CmdCopyBuffer(cb, sb.buffer, out_buf.buffer, 1, &buffer_copy)
