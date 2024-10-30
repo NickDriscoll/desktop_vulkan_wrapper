@@ -83,6 +83,7 @@ Graphics_Device :: struct {
     // Basic Vulkan state that every app definitely needs
     instance: vk.Instance,
     physical_device: vk.PhysicalDevice,
+    physical_device_properties: vk.PhysicalDeviceProperties2,
     device: vk.Device,
     pipeline_cache: vk.PipelineCache,
     alloc_callbacks: ^vk.AllocationCallbacks,
@@ -248,6 +249,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
 
     // Create Vulkan device
     phys_device: vk.PhysicalDevice
+    properties: vk.PhysicalDeviceProperties2
     device: vk.Device
     gfx_queue_family: u32
     compute_queue_family: u32
@@ -276,21 +278,25 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             // @TODO: Do something more sophisticated than picking the first DISCRETE_GPU
             if props.properties.deviceType == .DISCRETE_GPU {
                 // Check physical device features
+                vulkan_11_features: vk.PhysicalDeviceVulkan11Features
                 vulkan_12_features: vk.PhysicalDeviceVulkan12Features
                 dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures
                 sync2_features: vk.PhysicalDeviceSynchronization2Features
 
+                vulkan_11_features.sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES
                 vulkan_12_features.sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
                 dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
                 sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
                 features.sType = .PHYSICAL_DEVICE_FEATURES_2
 
+                vulkan_12_features.pNext = &vulkan_11_features
                 dynamic_rendering_features.pNext = &vulkan_12_features
                 sync2_features.pNext = &dynamic_rendering_features
                 features.pNext = &sync2_features
                 vk.GetPhysicalDeviceFeatures2(pd, &features)
 
                 has_right_features :=
+                    vulkan_11_features.variablePointers &&
                     vulkan_12_features.descriptorIndexing &&
                     vulkan_12_features.runtimeDescriptorArray &&
                     vulkan_12_features.timelineSemaphore &&
@@ -299,6 +305,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                     sync2_features.synchronization2 
                 if has_right_features {
                     phys_device = pd
+                    properties = props
                     log.infof("Chosen GPU: %s", string(props.properties.deviceName[:]))
                     break
                 }
@@ -737,6 +744,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     gd := Graphics_Device {
         instance = inst,
         physical_device = phys_device,
+        physical_device_properties = properties,
         device = device,
         frames_in_flight = frames_in_flight,
         alloc_callbacks = allocation_callbacks,
@@ -963,6 +971,7 @@ sync_write_buffer :: proc(
     out_buf := hm.get(&gd.buffers, hm.Handle(out_buffer)) or_return
     semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
     in_bytes := slice.from_ptr(slice.as_ptr(in_slice), len(in_slice) * size_of(Element_Type))
+    base_offset_bytes := base_offset * size_of(Element_Type)
     
     // Staging buffer
     sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
@@ -990,7 +999,7 @@ sync_write_buffer :: proc(
         // Copy from staging buffer to actual buffer
         buffer_copy := vk.BufferCopy {
             srcOffset = 0,
-            dstOffset = vk.DeviceSize(bytes_transferred) + vk.DeviceSize(base_offset),
+            dstOffset = vk.DeviceSize(bytes_transferred) + vk.DeviceSize(base_offset_bytes),
             size = vk.DeviceSize(iter_size)
         }
         vk.CmdCopyBuffer(cb, sb.buffer, out_buf.buffer, 1, &buffer_copy)
