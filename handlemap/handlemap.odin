@@ -1,6 +1,7 @@
 // Implementation from https://gist.github.com/gingerBill/7282ff54744838c52cc80c559f697051
 
 package handlemap
+import "base:builtin"
 
 Handle_Map :: struct($T: typeid) {
 	handles:        [dynamic]Handle,
