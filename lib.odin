@@ -838,6 +838,7 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
     // Get swapchain images
     image_count : u32 = 0
     swapchain_images: [dynamic]vk.Image
+    defer delete(swapchain_images)
     {
         vk.GetSwapchainImagesKHR(gd.device, gd.swapchain, &image_count, nil)
         resize(&swapchain_images, image_count)
@@ -845,6 +846,7 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
     }
     
     swapchain_image_views: [dynamic]vk.ImageView
+    defer delete(swapchain_image_views)
     resize(&swapchain_image_views, image_count)
     // Create image views for the swapchain images for rendering
     {
@@ -879,6 +881,103 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
                 image = swapchain_images[i],
                 image_view = swapchain_image_views[i]
             }
+            gd.swapchain_images[i] = Image_Handle(hm.insert(&gd.images, im))
+
+            info := Semaphore_Info {
+                type = .BINARY
+            }
+            gd.acquire_semaphores[i] = create_semaphore(gd, &info)
+            gd.present_semaphores[i] = create_semaphore(gd, &info)
+        }
+    }
+
+    return true
+}
+
+resize_window :: proc(gd: ^Graphics_Device, new_dims: int2) -> bool {
+    // The graphics device's swapchain should exist
+    assert(gd.swapchain != 0)
+
+    // @TODO: Allow more configurability of swapchain options
+    // particularly pertaining to presentation mode and image format
+    image_format := vk.Format.B8G8R8A8_SRGB
+    create_info := vk.SwapchainCreateInfoKHR {
+        sType = .SWAPCHAIN_CREATE_INFO_KHR,
+        pNext = nil,
+        flags = nil,
+        surface = gd.surface,
+        minImageCount = gd.frames_in_flight,
+        imageFormat = image_format,
+        imageColorSpace = .SRGB_NONLINEAR,
+        imageExtent = vk.Extent2D {
+            width = u32(new_dims.x),
+            height = u32(new_dims.y)
+        },
+        imageArrayLayers = 1,
+        imageUsage = {.COLOR_ATTACHMENT},
+        imageSharingMode = .EXCLUSIVE,
+        queueFamilyIndexCount = 1,
+        pQueueFamilyIndices = &gd.gfx_queue_family,
+        preTransform = {.IDENTITY},
+        compositeAlpha = {.OPAQUE},
+        presentMode = .FIFO,
+        clipped = true,
+        oldSwapchain = gd.swapchain
+    }
+    temp: vk.SwapchainKHR
+    if vk.CreateSwapchainKHR(gd.device, &create_info, gd.alloc_callbacks, &temp) != .SUCCESS {
+        return false
+    }
+    gd.swapchain = temp
+
+    // Get swapchain images
+    image_count : u32 = 0
+    swapchain_images: [dynamic]vk.Image
+    defer delete(swapchain_images)
+    {
+        vk.GetSwapchainImagesKHR(gd.device, gd.swapchain, &image_count, nil)
+        resize(&swapchain_images, image_count)
+        vk.GetSwapchainImagesKHR(gd.device, gd.swapchain, &image_count, raw_data(swapchain_images))
+    }
+    
+    swapchain_image_views: [dynamic]vk.ImageView
+    defer delete(swapchain_image_views)
+    resize(&swapchain_image_views, image_count)
+    // Create image views for the swapchain images for rendering
+    {
+        for vkimage, i in swapchain_images {
+            info := vk.ImageViewCreateInfo {
+                sType = .IMAGE_VIEW_CREATE_INFO,
+                pNext = nil,
+                flags = nil,
+                image = vkimage,
+                viewType = .D2,
+                format = image_format,
+                components = IDENTITY_COMPONENT_SWIZZLE,
+                subresourceRange = {
+                    aspectMask = {.COLOR},
+                    baseMipLevel = 0,
+                    levelCount = 1,
+                    baseArrayLayer = 0,
+                    layerCount = 1
+                }
+            }
+            vk.CreateImageView(gd.device, &info, gd.alloc_callbacks, &swapchain_image_views[i])
+        }
+    }
+
+    {
+        clear(&gd.acquire_semaphores)
+        clear(&gd.present_semaphores)
+        gd := gd
+        resize(&gd.acquire_semaphores, image_count)
+        resize(&gd.present_semaphores, image_count)
+        for i : u32 = 0; i < image_count; i += 1 {
+            im := Image {
+                image = swapchain_images[i],
+                image_view = swapchain_image_views[i]
+            }
+            hm.remove(&gd.images, hm.Handle(gd.swapchain_images[i]))
             gd.swapchain_images[i] = Image_Handle(hm.insert(&gd.images, im))
 
             info := Semaphore_Info {
