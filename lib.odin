@@ -15,7 +15,6 @@ import "odin-vma/vma"
 import hm "handlemap"
 
 MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
-TOTAL_SAMPLERS :: 2
 IMAGES_DESCRIPTOR_BINDING :: 0
 SAMPLERS_DESCRIPTOR_BINDING :: 1
 
@@ -23,6 +22,7 @@ Immutable_Samplers :: enum u32 {
     Aniso16 = 0,
     Point = 1
 }
+TOTAL_SAMPLERS :: len(Immutable_Samplers)
 
 // Sizes in bytes
 PUSH_CONSTANTS_SIZE :: 128
