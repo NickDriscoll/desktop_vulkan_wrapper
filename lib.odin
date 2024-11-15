@@ -18,11 +18,11 @@ MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
 IMAGES_DESCRIPTOR_BINDING :: 0
 SAMPLERS_DESCRIPTOR_BINDING :: 1
 
-Immutable_Samplers :: enum u32 {
+Immutable_Sampler_Index :: enum u32 {
     Aniso16 = 0,
     Point = 1
 }
-TOTAL_SAMPLERS :: len(Immutable_Samplers)
+TOTAL_SAMPLERS :: len(Immutable_Sampler_Index)
 
 // Sizes in bytes
 PUSH_CONSTANTS_SIZE :: 128
@@ -1072,86 +1072,94 @@ sync_write_buffer :: proc(
     in_bytes := slice.from_ptr(slice.as_ptr(in_slice), len(in_slice) * size_of(Element_Type))
     base_offset_bytes := base_offset * size_of(Element_Type)
     
-    // Staging buffer
-    sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
-    sb_ptr := sb.alloc_info.mapped_data
-    
     total_bytes := len(in_bytes)
     bytes_transferred := 0
 
-    for bytes_transferred < total_bytes {
-        iter_size := min(total_bytes - bytes_transferred, STAGING_BUFFER_SIZE)
-        
-        // Copy to staging buffer
-        p := &in_bytes[bytes_transferred]
-        mem.copy(sb_ptr, p, iter_size)
+    if out_buf.alloc_info.mapped_data != nil {
+        in_p := &in_bytes[0]
+        out_p := out_buf.alloc_info.mapped_data
+        mem.copy(out_p, in_p, len(in_bytes))
+    } else {
 
-        // Begin transfer command buffer
-        begin_info := vk.CommandBufferBeginInfo {
-            sType = .COMMAND_BUFFER_BEGIN_INFO,
-            pNext = nil,
-            flags = {.ONE_TIME_SUBMIT},
-            pInheritanceInfo = nil
+        // Staging buffer
+        sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
+        sb_ptr := sb.alloc_info.mapped_data
+    
+        for bytes_transferred < total_bytes {
+            iter_size := min(total_bytes - bytes_transferred, STAGING_BUFFER_SIZE)
+            
+            // Copy to staging buffer
+            p := &in_bytes[bytes_transferred]
+            mem.copy(sb_ptr, p, iter_size)
+    
+            // Begin transfer command buffer
+            begin_info := vk.CommandBufferBeginInfo {
+                sType = .COMMAND_BUFFER_BEGIN_INFO,
+                pNext = nil,
+                flags = {.ONE_TIME_SUBMIT},
+                pInheritanceInfo = nil
+            }
+            vk.BeginCommandBuffer(cb, &begin_info)
+    
+            // Copy from staging buffer to actual buffer
+            buffer_copy := vk.BufferCopy {
+                srcOffset = 0,
+                dstOffset = vk.DeviceSize(bytes_transferred) + vk.DeviceSize(base_offset_bytes),
+                size = vk.DeviceSize(iter_size)
+            }
+            vk.CmdCopyBuffer(cb, sb.buffer, out_buf.buffer, 1, &buffer_copy)
+            vk.EndCommandBuffer(cb)
+    
+            // Actually submit this lonesome command to the transfer queue
+            cb_info := vk.CommandBufferSubmitInfo {
+                sType = .COMMAND_BUFFER_SUBMIT_INFO,
+                pNext = nil,
+                commandBuffer = cb,
+                deviceMask = 0
+            }
+    
+            // Increment transfer timeline counter
+            new_timeline_value := gd.transfers_completed + 1
+            signal_info := vk.SemaphoreSubmitInfo {
+                sType = .SEMAPHORE_SUBMIT_INFO,
+                pNext = nil,
+                semaphore = semaphore^,
+                value = new_timeline_value,
+                stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+                deviceIndex = 0
+            }
+    
+            submit_info := vk.SubmitInfo2 {
+                sType = .SUBMIT_INFO_2,
+                pNext = nil,
+                flags = nil,
+                commandBufferInfoCount = 1,
+                pCommandBufferInfos = &cb_info,
+                signalSemaphoreInfoCount = 1,
+                pSignalSemaphoreInfos = &signal_info
+            }
+            if vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
+                log.error("Failed to submit to transfer queue.")
+            }
+    
+            // CPU wait
+            wait_info := vk.SemaphoreWaitInfo {
+                sType = .SEMAPHORE_WAIT_INFO,
+                pNext = nil,
+                flags = nil,
+                semaphoreCount = 1,
+                pSemaphores = semaphore,
+                pValues = &new_timeline_value
+            }
+            if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
+                log.error("Failed to wait for transfer semaphore.")
+            }
+    
+            gd.transfers_completed += 1
+            bytes_transferred += iter_size
         }
-        vk.BeginCommandBuffer(cb, &begin_info)
-
-        // Copy from staging buffer to actual buffer
-        buffer_copy := vk.BufferCopy {
-            srcOffset = 0,
-            dstOffset = vk.DeviceSize(bytes_transferred) + vk.DeviceSize(base_offset_bytes),
-            size = vk.DeviceSize(iter_size)
-        }
-        vk.CmdCopyBuffer(cb, sb.buffer, out_buf.buffer, 1, &buffer_copy)
-        vk.EndCommandBuffer(cb)
-
-        // Actually submit this lonesome command to the transfer queue
-        cb_info := vk.CommandBufferSubmitInfo {
-            sType = .COMMAND_BUFFER_SUBMIT_INFO,
-            pNext = nil,
-            commandBuffer = cb,
-            deviceMask = 0
-        }
-
-        // Increment transfer timeline counter
-        new_timeline_value := gd.transfers_completed + 1
-        signal_info := vk.SemaphoreSubmitInfo {
-            sType = .SEMAPHORE_SUBMIT_INFO,
-            pNext = nil,
-            semaphore = semaphore^,
-            value = new_timeline_value,
-            stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
-            deviceIndex = 0
-        }
-
-        submit_info := vk.SubmitInfo2 {
-            sType = .SUBMIT_INFO_2,
-            pNext = nil,
-            flags = nil,
-            commandBufferInfoCount = 1,
-            pCommandBufferInfos = &cb_info,
-            signalSemaphoreInfoCount = 1,
-            pSignalSemaphoreInfos = &signal_info
-        }
-        if vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
-            log.error("Failed to submit to transfer queue.")
-        }
-
-        // CPU wait
-        wait_info := vk.SemaphoreWaitInfo {
-            sType = .SEMAPHORE_WAIT_INFO,
-            pNext = nil,
-            flags = nil,
-            semaphoreCount = 1,
-            pSemaphores = semaphore,
-            pValues = &new_timeline_value
-        }
-        if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
-            log.error("Failed to wait for transfer semaphore.")
-        }
-
-        gd.transfers_completed += 1
-        bytes_transferred += iter_size
     }
+    
 
     return true
 }
