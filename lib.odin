@@ -4,6 +4,7 @@ import "core:container/queue"
 import "core:fmt"
 import "core:log"
 import "core:math"
+import "core:math/linalg/hlsl"
 import "core:mem"
 import "core:os"
 import "core:slice"
@@ -34,13 +35,6 @@ IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
     b = .B,
     a = .A,
 }
-
-float2   :: [2]f32
-float3   :: [3]f32
-float4   :: [4]f32
-float4x4 :: [4][4]f32
-int2     :: [2]i32
-uint2    :: [2]u32
 
 Queue_Family :: enum {
     Graphics,
@@ -894,7 +888,7 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
     return true
 }
 
-resize_window :: proc(gd: ^Graphics_Device, new_dims: int2) -> bool {
+resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.int2) -> bool {
     // The graphics device's swapchain should exist
     assert(gd.swapchain != 0)
 
@@ -1065,7 +1059,6 @@ sync_write_buffer :: proc(
     in_slice: []Element_Type,
     base_offset : u32 = 0
 ) -> bool {
-    
     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
     out_buf := hm.get(&gd.buffers, hm.Handle(out_buffer)) or_return
     semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
@@ -1205,10 +1198,16 @@ Image_Delete :: struct {
 Pending_Image :: struct {
     image: vk.Image,
     view: vk.ImageView,
-    layout: vk.ImageLayout
+    old_layout: vk.ImageLayout,
+    new_layout: vk.ImageLayout,
+    aspect_mask: vk.ImageAspectFlags,
+    is_transfer: bool
 }
 
 create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> Image_Handle {
+    // TRANSFER_DST is required for layout transitions period.
+    usage += {.TRANSFER_DST}
+
     // Calculate mipmap count
     mip_count : u32 = 1
     if supports_mipmaps {
@@ -1277,8 +1276,13 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
             case .D3: view_type = .D3
         }
 
+        aspect_mask : vk.ImageAspectFlags = {.COLOR}
+        if format == .D32_SFLOAT {
+            aspect_mask = {.DEPTH}
+        }
+
         subresource_range := vk.ImageSubresourceRange {
-            aspectMask = {.COLOR},
+            aspectMask = aspect_mask,
             baseMipLevel = 0,
             levelCount = u32(mip_count),
             baseArrayLayer = 0,
@@ -1303,6 +1307,30 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
     return Image_Handle(hm.insert(&gd.images, image))
 }
 
+new_bindless_image :: proc(gd: ^Graphics_Device, using info: ^Image_Create, layout: vk.ImageLayout) -> Image_Handle {
+    handle := create_image(gd, info)
+    image, ok := hm.get(&gd.images, hm.Handle(handle))
+    if !ok {
+        log.error("Error in new_bindless_image()")
+    }
+
+    aspect_mask : vk.ImageAspectFlags = {.COLOR}
+    if format == .D32_SFLOAT {
+        aspect_mask = {.DEPTH}
+    }
+
+    queue.push_back(&gd.pending_images, Pending_Image {
+        image = image.image,
+        view = image.image_view,
+        old_layout = .UNDEFINED,
+        new_layout = layout,
+        aspect_mask = aspect_mask,
+        is_transfer = false
+    })
+
+    return handle
+}
+
 get_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (^Image, bool) {
     return hm.get(&gd.images, hm.Handle(handle))
 }
@@ -1323,9 +1351,7 @@ sync_create_image_with_data :: proc(
     out_handle = create_image(gd, create_info)
     out_image := hm.get(&gd.images, hm.Handle(out_handle)) or_return
 
-    width := extent.width
-    height := extent.height
-    depth := extent.depth
+    using extent
 
     cb_idx := CommandBuffer_Index(in_flight_idx(gd))
     cb := gd.transfer_command_buffers[cb_idx]
@@ -1460,8 +1486,9 @@ sync_create_image_with_data :: proc(
             signalSemaphoreInfoCount = 1,
             pSignalSemaphoreInfos = &signal_info
         }
-        if vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
-            log.error("Failed to submit to transfer queue.")
+        res := vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0)
+        if res != .SUCCESS {
+            log.errorf("Failed to submit to transfer queue: %v", res)
         }
 
         // CPU wait
@@ -1482,10 +1509,19 @@ sync_create_image_with_data :: proc(
         amount_transferred += iter_size
     }
 
+
+    aspect_mask : vk.ImageAspectFlags = {.COLOR}
+    if format == .D32_SFLOAT {
+        aspect_mask = {.DEPTH}
+    }
+
     queue.push_back(&gd.pending_images, Pending_Image {
         image = out_image.image,
         view = out_image.image_view,
-        layout = .SHADER_READ_ONLY_OPTIMAL
+        old_layout = .TRANSFER_DST_OPTIMAL,
+        new_layout = .SHADER_READ_ONLY_OPTIMAL,
+        aspect_mask = aspect_mask,
+        is_transfer = true
     })
 
     ok = true
@@ -1535,21 +1571,24 @@ begin_frame :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
     {
         write_ct := 0
         for queue.len(gd.pending_images) > 0 {
-            using iter_image := queue.pop_front(&gd.pending_images)
+            iter_image := queue.pop_front(&gd.pending_images)
+
+            src_queue_family := gd.gfx_queue_family
+            if iter_image.is_transfer do src_queue_family = gd.transfer_queue_family
             
             barriers := []Image_Barrier {
                 {
                     //src_stage_mask = {.TRANSFER},             Ignored in acquire operation
                     //src_access_mask = {.TRANSFER_WRITE},      Ignored in acquire operation
                     dst_stage_mask = {.ALL_COMMANDS},
-                    dst_access_mask = {.MEMORY_READ, .MEMORY_WRITE},
-                    old_layout = .TRANSFER_DST_OPTIMAL,
-                    new_layout = .SHADER_READ_ONLY_OPTIMAL,
+                    dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+                    old_layout = iter_image.old_layout,
+                    new_layout = iter_image.new_layout,
                     src_queue_family = gd.transfer_queue_family,
                     dst_queue_family = gd.gfx_queue_family,
-                    image = image,
+                    image = iter_image.image,
                     subresource_range = {
-                        aspectMask = {.COLOR},
+                        aspectMask = iter_image.aspect_mask,
                         baseMipLevel = 0,
                         levelCount = 1,
                         baseArrayLayer = 0,
@@ -1564,7 +1603,7 @@ begin_frame :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
             // Save descriptor update data
             for gd.images.values[current_image_idx].image_view != iter_image.view do current_image_idx += 1
             append(&d_image_infos, vk.DescriptorImageInfo {
-                imageView = view,
+                imageView = iter_image.view,
                 imageLayout = .SHADER_READ_ONLY_OPTIMAL
             })
             append(&d_writes, vk.WriteDescriptorSet {
@@ -1719,8 +1758,8 @@ submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_In
 Framebuffer :: struct {
     color_images: [8]Image_Handle,
     depth_image: Image_Handle,
-    resolution: uint2,
-    clear_color: float4,
+    resolution: hlsl.uint2,
+    clear_color: hlsl.float4,
     color_load_op: vk.AttachmentLoadOp
 }
 
@@ -1737,7 +1776,7 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
         storeOp = .STORE,
         clearValue = vk.ClearValue {
             color = vk.ClearColorValue {
-                float32 = framebuffer.clear_color
+                float32 = cast([4]f32)framebuffer.clear_color
             }
         }
     }
@@ -2099,7 +2138,7 @@ ColorBlend_State :: struct {
     flags: vk.PipelineColorBlendStateCreateFlags,
     do_logic_op: bool,
     logic_op: vk.LogicOp,
-    blend_constants: float4,
+    blend_constants: hlsl.float4,
     attachment: ColorBlend_Attachment
     //attachments: [dynamic]ColorBlend_Attachment
 }
@@ -2371,7 +2410,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
             logicOpEnable = b32(colorblend_state.do_logic_op),
             attachmentCount = 1,
             pAttachments = &colorblend_attachments[i],
-            blendConstants = colorblend_state.blend_constants
+            blendConstants = cast([4]f32)colorblend_state.blend_constants
         }
 
         // Render pass state
