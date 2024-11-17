@@ -1331,6 +1331,94 @@ new_bindless_image :: proc(gd: ^Graphics_Device, using info: ^Image_Create, layo
         is_transfer = false
     })
 
+    
+
+    // Record queue family ownership transfer
+    // @TODO: Barrier is overly opinionated about future usage
+    cb_idx := CommandBuffer_Index(in_flight_idx(gd))
+    cb := gd.transfer_command_buffers[cb_idx]
+
+    vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        pNext = nil,
+        flags = {.ONE_TIME_SUBMIT},
+        pInheritanceInfo = nil
+    })
+
+    semaphore, ok2 := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline))
+    if !ok2 do log.error("Error getting transfer timeline semaphore")
+
+    barriers := []Image_Barrier {
+        {
+            src_stage_mask = {.ALL_COMMANDS},
+            src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+            //dst_stage_mask = {.ALL_GRAPHICS}, Ignored during release operation
+            //dst_access_mask = {.SHADER_READ}, Ignored during release operation
+            old_layout = .UNDEFINED,
+            new_layout = layout,
+            src_queue_family = gd.transfer_queue_family,
+            dst_queue_family = gd.gfx_queue_family,
+            image = image.image,
+            subresource_range = {
+                aspectMask = aspect_mask,
+                baseMipLevel = 0,
+                levelCount = 1,
+                baseArrayLayer = 0,
+                layerCount = 1
+            }
+        }
+    }
+    cmd_transfer_pipeline_barriers(gd, cb_idx, barriers)
+
+    vk.EndCommandBuffer(cb)
+
+    // Actually submit this lonesome command to the transfer queue
+    cb_info := vk.CommandBufferSubmitInfo {
+        sType = .COMMAND_BUFFER_SUBMIT_INFO,
+        pNext = nil,
+        commandBuffer = cb,
+        deviceMask = 0
+    }
+
+    // Increment transfer timeline counter
+    new_timeline_value := gd.transfers_completed + 1
+    signal_info := vk.SemaphoreSubmitInfo {
+        sType = .SEMAPHORE_SUBMIT_INFO,
+        pNext = nil,
+        semaphore = semaphore^,
+        value = new_timeline_value,
+        stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+        deviceIndex = 0
+    }
+
+    submit_info := vk.SubmitInfo2 {
+        sType = .SUBMIT_INFO_2,
+        pNext = nil,
+        flags = nil,
+        commandBufferInfoCount = 1,
+        pCommandBufferInfos = &cb_info,
+        signalSemaphoreInfoCount = 1,
+        pSignalSemaphoreInfos = &signal_info
+    }
+    res := vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0)
+    if res != .SUCCESS {
+        log.errorf("Failed to submit to transfer queue: %v", res)
+    }
+
+    // CPU wait
+    wait_info := vk.SemaphoreWaitInfo {
+        sType = .SEMAPHORE_WAIT_INFO,
+        pNext = nil,
+        flags = nil,
+        semaphoreCount = 1,
+        pSemaphores = semaphore,
+        pValues = &new_timeline_value
+    }
+    if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
+        log.error("Failed to wait for transfer semaphore.")
+    }
+    gd.transfers_completed += 1
+
     return handle
 }
 
