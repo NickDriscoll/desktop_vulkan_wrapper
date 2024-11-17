@@ -16,8 +16,11 @@ import "odin-vma/vma"
 import hm "handlemap"
 
 MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
-IMAGES_DESCRIPTOR_BINDING :: 0
-SAMPLERS_DESCRIPTOR_BINDING :: 1
+
+Bindless_Descriptor_Bindings :: enum u32 {
+    Images = 0,
+    Samplers = 1
+}
 
 Immutable_Sampler_Index :: enum u32 {
     Aniso16 = 0,
@@ -644,14 +647,14 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         }
 
         image_binding := vk.DescriptorSetLayoutBinding {
-            binding = IMAGES_DESCRIPTOR_BINDING,
+            binding = u32(Bindless_Descriptor_Bindings.Images),
             descriptorType = .SAMPLED_IMAGE,
             descriptorCount = MAXIMUM_BINDLESS_IMAGES,
             stageFlags = {.FRAGMENT},
             pImmutableSamplers = nil
         }
         sampler_binding := vk.DescriptorSetLayoutBinding {
-            binding = SAMPLERS_DESCRIPTOR_BINDING,
+            binding = u32(Bindless_Descriptor_Bindings.Samplers),
             descriptorType = .SAMPLER,
             descriptorCount = TOTAL_SAMPLERS,
             stageFlags = {.FRAGMENT},
@@ -1610,7 +1613,7 @@ begin_frame :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
                 sType = .WRITE_DESCRIPTOR_SET,
                 pNext = nil,
                 dstSet = gd.descriptor_set,
-                dstBinding = IMAGES_DESCRIPTOR_BINDING,
+                dstBinding = u32(Bindless_Descriptor_Bindings.Images),
                 dstArrayElement = u32(current_image_idx),
                 descriptorCount = 1,
                 descriptorType = .SAMPLED_IMAGE,
