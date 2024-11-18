@@ -1851,14 +1851,15 @@ Framebuffer :: struct {
     depth_image: Image_Handle,
     resolution: hlsl.uint2,
     clear_color: hlsl.float4,
-    color_load_op: vk.AttachmentLoadOp
+    color_load_op: vk.AttachmentLoadOp,
+    depth_load_op: vk.AttachmentLoadOp
 }
 
 cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
     cb := gd.gfx_command_buffers[cb_idx]
 
     iv, ok := hm.get(&gd.images, hm.Handle(framebuffer.color_images[0]))
-    color_attachment := vk.RenderingAttachmentInfo{
+    color_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO_KHR,
         pNext = nil,
         imageView = iv.image_view,
@@ -1889,6 +1890,27 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
         pDepthAttachment = nil,
         pStencilAttachment = nil
     }
+
+    depth_attachment: vk.RenderingAttachmentInfo
+    depth_image, ok2 := hm.get(&gd.images, hm.Handle(framebuffer.depth_image))
+    if ok2 {
+        depth_attachment = vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            pNext = nil,
+            imageView = depth_image.image_view,
+            imageLayout = .DEPTH_ATTACHMENT_OPTIMAL,
+            loadOp = framebuffer.depth_load_op,
+            storeOp = .STORE,
+            clearValue = {
+                depthStencil = {
+                    depth = 0.0
+                }
+            }
+        }
+        info.pDepthAttachment = &depth_attachment
+    }
+
+
     vk.CmdBeginRenderingKHR(cb, &info)
 }
 
