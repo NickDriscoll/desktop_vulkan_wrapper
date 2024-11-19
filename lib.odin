@@ -24,7 +24,8 @@ Bindless_Descriptor_Bindings :: enum u32 {
 
 Immutable_Sampler_Index :: enum u32 {
     Aniso16 = 0,
-    Point = 1
+    Point = 1,
+    PostFX = 2
 }
 TOTAL_SAMPLERS :: len(Immutable_Sampler_Index)
 
@@ -644,6 +645,21 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 anisotropyEnable = false
             }
             vk.CreateSampler(device, &point_sampler_info, allocation_callbacks, &samplers[1])
+            aniso_clamped_info := vk.SamplerCreateInfo {
+                sType = .SAMPLER_CREATE_INFO,
+                pNext = nil,
+                flags = nil,
+                magFilter = .LINEAR,
+                minFilter = .LINEAR,
+                mipmapMode = .NEAREST,
+                addressModeU = .CLAMP_TO_EDGE,
+                addressModeV = .CLAMP_TO_EDGE,
+                addressModeW = .CLAMP_TO_EDGE,
+                mipLodBias = 0.0,
+                anisotropyEnable = true,
+                maxAnisotropy = 16.0
+            }
+            vk.CreateSampler(device, &aniso_clamped_info, allocation_callbacks, &samplers[2])
         }
 
         image_binding := vk.DescriptorSetLayoutBinding {
