@@ -1634,87 +1634,6 @@ delete_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> bool {
     return true
 }
 
-// General procedure for doing "per-frame" work
-begin_frame :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
-    // Process buffer delete queue
-    for queue.len(gd.buffer_deletes) > 0 && queue.peek_front(&gd.buffer_deletes).death_frame == gd.frame_count {
-        buffer := queue.pop_front(&gd.buffer_deletes)
-        log.debugf("Destroying buffer %s...", buffer.buffer)
-        vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
-    }
-
-    // Process image delete queue
-    for queue.len(gd.image_deletes) > 0 && queue.peek_front(&gd.image_deletes).death_frame == gd.frame_count {
-        image := queue.pop_front(&gd.image_deletes)
-        log.debugf("Destroying image %s...", image.image)
-        vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
-        vma.destroy_image(gd.allocator, image.image, image.allocation)
-    }
-
-    d_image_infos: [dynamic]vk.DescriptorImageInfo
-    defer delete(d_image_infos)
-    d_writes: [dynamic]vk.WriteDescriptorSet
-    defer delete(d_writes)
-    
-    current_image_idx := 0
-
-    // Record queue family ownership transfer for in-flight images
-    {
-        write_ct := 0
-        for queue.len(gd.pending_images) > 0 {
-            iter_image := queue.pop_front(&gd.pending_images)
-
-            src_queue_family := gd.gfx_queue_family
-            if iter_image.is_transfer do src_queue_family = gd.transfer_queue_family
-            
-            barriers := []Image_Barrier {
-                {
-                    //src_stage_mask = {.TRANSFER},             Ignored in acquire operation
-                    //src_access_mask = {.TRANSFER_WRITE},      Ignored in acquire operation
-                    dst_stage_mask = {.ALL_COMMANDS},
-                    dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
-                    old_layout = iter_image.old_layout,
-                    new_layout = iter_image.new_layout,
-                    src_queue_family = gd.transfer_queue_family,
-                    dst_queue_family = gd.gfx_queue_family,
-                    image = iter_image.image,
-                    subresource_range = {
-                        aspectMask = iter_image.aspect_mask,
-                        baseMipLevel = 0,
-                        levelCount = 1,
-                        baseArrayLayer = 0,
-                        layerCount = 1
-                    }
-                }
-            }
-            cmd_gfx_pipeline_barriers(gd, cb_idx, barriers)
-
-            // @TODO: Record mipmap generation commands
-
-            // Save descriptor update data
-            for gd.images.values[current_image_idx].image_view != iter_image.view do current_image_idx += 1
-            append(&d_image_infos, vk.DescriptorImageInfo {
-                imageView = iter_image.view,
-                imageLayout = .SHADER_READ_ONLY_OPTIMAL
-            })
-            append(&d_writes, vk.WriteDescriptorSet {
-                sType = .WRITE_DESCRIPTOR_SET,
-                pNext = nil,
-                dstSet = gd.descriptor_set,
-                dstBinding = u32(Bindless_Descriptor_Bindings.Images),
-                dstArrayElement = u32(current_image_idx),
-                descriptorCount = 1,
-                descriptorType = .SAMPLED_IMAGE,
-                pImageInfo = &d_image_infos[write_ct]
-            })
-            write_ct += 1
-        }
-    }
-
-    // Update sampled image descriptors
-    if len(d_writes) > 0 do vk.UpdateDescriptorSets(gd.device, u32(len(d_writes)), &d_writes[0], 0, nil)
-}
-
 acquire_swapchain_image :: proc(gd: ^Graphics_Device, out_image_idx: ^u32) -> bool {
     idx := in_flight_idx(gd)
     sem := get_semaphore(gd, gd.acquire_semaphores[idx]) or_return
@@ -1754,8 +1673,40 @@ present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> bool {
 
 CommandBuffer_Index :: distinct u32
 
-begin_gfx_command_buffer :: proc(gd: ^Graphics_Device) -> CommandBuffer_Index {
-    cb_idx := gd.next_gfx_command_buffer
+begin_gfx_command_buffer :: proc(
+    gd: ^Graphics_Device,
+    sync_info: ^Sync_Info,
+    gfx_timeline_semaphore: Semaphore_Handle
+) -> CommandBuffer_Index {
+    
+    
+    // Sync point where we wait if there are already N frames in the gfx queue
+    if gd.frame_count >= u64(gd.frames_in_flight) {
+        // Wait on timeline semaphore before starting command buffer execution
+        wait_value := gd.frame_count - u64(gd.frames_in_flight) + 1
+        append(&sync_info.wait_ops, Semaphore_Op {
+            semaphore = gfx_timeline_semaphore,
+            value = wait_value
+        })
+        
+        // CPU-sync to prevent CPU from getting further ahead than
+        // the number of frames in flight
+        sem, ok := get_semaphore(gd, gfx_timeline_semaphore)
+        if !ok do log.error("Couldn't find semaphore for CPU-sync")
+        info := vk.SemaphoreWaitInfo {
+            sType = .SEMAPHORE_WAIT_INFO,
+            pNext = nil,
+            flags = nil,
+            semaphoreCount = 1,
+            pSemaphores = sem,
+            pValues = &wait_value
+        }
+        if vk.WaitSemaphores(gd.device, &info, max(u64)) != .SUCCESS {
+            log.error("Failed to wait for timeline semaphore CPU-side man what")
+        }
+    }
+
+    cb_idx := CommandBuffer_Index(gd.next_gfx_command_buffer)
     gd.next_gfx_command_buffer = (gd.next_gfx_command_buffer + 1) % gd.frames_in_flight
 
     cb := gd.gfx_command_buffers[cb_idx]
@@ -1769,7 +1720,88 @@ begin_gfx_command_buffer :: proc(gd: ^Graphics_Device) -> CommandBuffer_Index {
         log.error("Unable to begin gfx command buffer.")
     }
 
-    return CommandBuffer_Index(cb_idx)
+    // Do per-frame that has to happen for any gfx command buffer
+    {
+        // Process buffer delete queue
+        for queue.len(gd.buffer_deletes) > 0 && queue.peek_front(&gd.buffer_deletes).death_frame == gd.frame_count {
+            buffer := queue.pop_front(&gd.buffer_deletes)
+            log.debugf("Destroying buffer %s...", buffer.buffer)
+            vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
+        }
+
+        // Process image delete queue
+        for queue.len(gd.image_deletes) > 0 && queue.peek_front(&gd.image_deletes).death_frame == gd.frame_count {
+            image := queue.pop_front(&gd.image_deletes)
+            log.debugf("Destroying image %s...", image.image)
+            vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
+            vma.destroy_image(gd.allocator, image.image, image.allocation)
+        }
+
+        d_image_infos: [dynamic]vk.DescriptorImageInfo
+        defer delete(d_image_infos)
+        d_writes: [dynamic]vk.WriteDescriptorSet
+        defer delete(d_writes)
+        
+        current_image_idx := 0
+
+        // Record queue family ownership transfer for in-flight images
+        {
+            write_ct := 0
+            for queue.len(gd.pending_images) > 0 {
+                iter_image := queue.pop_front(&gd.pending_images)
+
+                src_queue_family := gd.gfx_queue_family
+                if iter_image.is_transfer do src_queue_family = gd.transfer_queue_family
+                
+                barriers := []Image_Barrier {
+                    {
+                        //src_stage_mask = {.TRANSFER},             Ignored in acquire operation
+                        //src_access_mask = {.TRANSFER_WRITE},      Ignored in acquire operation
+                        dst_stage_mask = {.ALL_COMMANDS},
+                        dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+                        old_layout = iter_image.old_layout,
+                        new_layout = iter_image.new_layout,
+                        src_queue_family = gd.transfer_queue_family,
+                        dst_queue_family = gd.gfx_queue_family,
+                        image = iter_image.image,
+                        subresource_range = {
+                            aspectMask = iter_image.aspect_mask,
+                            baseMipLevel = 0,
+                            levelCount = 1,
+                            baseArrayLayer = 0,
+                            layerCount = 1
+                        }
+                    }
+                }
+                cmd_gfx_pipeline_barriers(gd, cb_idx, barriers)
+
+                // @TODO: Record mipmap generation commands
+
+                // Save descriptor update data
+                for gd.images.values[current_image_idx].image_view != iter_image.view do current_image_idx += 1
+                append(&d_image_infos, vk.DescriptorImageInfo {
+                    imageView = iter_image.view,
+                    imageLayout = .SHADER_READ_ONLY_OPTIMAL
+                })
+                append(&d_writes, vk.WriteDescriptorSet {
+                    sType = .WRITE_DESCRIPTOR_SET,
+                    pNext = nil,
+                    dstSet = gd.descriptor_set,
+                    dstBinding = u32(Bindless_Descriptor_Bindings.Images),
+                    dstArrayElement = u32(current_image_idx),
+                    descriptorCount = 1,
+                    descriptorType = .SAMPLED_IMAGE,
+                    pImageInfo = &d_image_infos[write_ct]
+                })
+                write_ct += 1
+            }
+        }
+
+        // Update sampled image descriptors
+        if len(d_writes) > 0 do vk.UpdateDescriptorSets(gd.device, u32(len(d_writes)), &d_writes[0], 0, nil)
+    }
+
+    return cb_idx
 }
 
 submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, sync: ^Sync_Info) {
