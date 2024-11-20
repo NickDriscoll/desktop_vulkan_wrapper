@@ -88,7 +88,7 @@ Graphics_Device :: struct {
     allocator: vma.Allocator,
     frames_in_flight: u32,
     frame_count: u64,
-    
+
     // Objects required to support windowing
     // Basically every app will use these, but maybe
     // these could be factored out
@@ -97,10 +97,11 @@ Graphics_Device :: struct {
     swapchain_images: [dynamic]Image_Handle,
     acquire_semaphores: [dynamic]Semaphore_Handle,
     present_semaphores: [dynamic]Semaphore_Handle,
+    resize_window: bool,
     
     // The Vulkan queues that the device will submit on
-    // May be aliases of each other if e.g. the GPU doesn't have
-    // an async compute queue
+    // May be aliases of each other if the GPU doesn't have
+    // e.g. an async compute queue or dedicated transfer queue
     gfx_queue_family: u32,
     compute_queue_family: u32,
     transfer_queue_family: u32,
@@ -616,7 +617,9 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     {
         // Create immutable samplers
         {
-            full_aniso_info := vk.SamplerCreateInfo {
+            sampler_infos := make([dynamic]vk.SamplerCreateInfo, len = 0, cap = TOTAL_SAMPLERS, allocator = context.temp_allocator)
+            defer delete(sampler_infos)
+            append(&sampler_infos, vk.SamplerCreateInfo {
                 sType = .SAMPLER_CREATE_INFO,
                 pNext = nil,
                 flags = nil,
@@ -629,9 +632,8 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 mipLodBias = 0.0,
                 anisotropyEnable = true,
                 maxAnisotropy = 16.0
-            }
-            vk.CreateSampler(device, &full_aniso_info, allocation_callbacks, &samplers[0])
-            point_sampler_info := vk.SamplerCreateInfo {
+            })
+            append(&sampler_infos, vk.SamplerCreateInfo {
                 sType = .SAMPLER_CREATE_INFO,
                 pNext = nil,
                 flags = nil,
@@ -643,9 +645,8 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 addressModeW = .REPEAT,
                 mipLodBias = 0.0,
                 anisotropyEnable = false
-            }
-            vk.CreateSampler(device, &point_sampler_info, allocation_callbacks, &samplers[1])
-            aniso_clamped_info := vk.SamplerCreateInfo {
+            })
+            append(&sampler_infos, vk.SamplerCreateInfo {
                 sType = .SAMPLER_CREATE_INFO,
                 pNext = nil,
                 flags = nil,
@@ -658,8 +659,11 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 mipLodBias = 0.0,
                 anisotropyEnable = true,
                 maxAnisotropy = 16.0
+            })
+
+            for &s, i in sampler_infos {
+                vk.CreateSampler(device, &s, allocation_callbacks, &samplers[i])
             }
-            vk.CreateSampler(device, &aniso_clamped_info, allocation_callbacks, &samplers[2])
         }
 
         image_binding := vk.DescriptorSetLayoutBinding {
@@ -907,7 +911,7 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
     return true
 }
 
-resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.int2) -> bool {
+resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
     // The graphics device's swapchain should exist
     assert(gd.swapchain != 0)
 
@@ -923,8 +927,8 @@ resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.int2) -> bool {
         imageFormat = image_format,
         imageColorSpace = .SRGB_NONLINEAR,
         imageExtent = vk.Extent2D {
-            width = u32(new_dims.x),
-            height = u32(new_dims.y)
+            width = new_dims.x,
+            height = new_dims.y
         },
         imageArrayLayers = 1,
         imageUsage = {.COLOR_ATTACHMENT},
@@ -941,6 +945,8 @@ resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.int2) -> bool {
     if vk.CreateSwapchainKHR(gd.device, &create_info, gd.alloc_callbacks, &temp) != .SUCCESS {
         return false
     }
+
+    vk.DestroySwapchainKHR(gd.device, gd.swapchain, gd.alloc_callbacks)
     gd.swapchain = temp
 
     // Get swapchain images
