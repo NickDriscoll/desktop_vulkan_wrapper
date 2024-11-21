@@ -8,6 +8,7 @@ import "core:math/linalg/hlsl"
 import "core:mem"
 import "core:os"
 import "core:slice"
+import "core:strings"
 
 import "vendor:sdl2"
 import vk "vendor:vulkan"
@@ -44,11 +45,6 @@ Queue_Family :: enum {
     Graphics,
     Compute,
     Transfer
-}
-
-Semaphore_Info :: struct {
-    type: vk.SemaphoreType,
-    init_value: u64,
 }
 
 Semaphore_Op :: struct {
@@ -159,6 +155,16 @@ API_Version :: enum {
     Vulkan13
 }
 
+debug_utils_callback :: proc "stdcall" (
+    messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT,
+    messageTypes: vk.DebugUtilsMessageTypeFlagsEXT,
+    pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT,
+    pUserData: rawptr
+) -> b32 {
+    message := pCallbackData.pMessage
+    return true
+}
+
 Init_Parameters :: struct {
     // Vulkan instance creation parameters
     app_name: cstring,
@@ -200,7 +206,6 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 log.info("Selected Vulkan 1.3")
                 api_version_int = vk.API_VERSION_1_3
         }
-            
         
         // Instead of forcing the caller to explicitly provide
         // the extensions they want to enable, I want to provide high-level
@@ -217,6 +222,17 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 append(&extensions, "VK_KHR_xlib_surface")
             }
         }
+
+        append(&extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+        debug_info := vk.DebugUtilsMessengerCreateInfoEXT {
+            sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+            pNext = nil,
+            flags = nil,
+            messageSeverity = {.ERROR,.WARNING},
+            messageType = {.GENERAL,.VALIDATION},
+            pfnUserCallback = debug_utils_callback,
+            pUserData = nil
+        }
         
         app_info := vk.ApplicationInfo {
             sType = .APPLICATION_INFO,
@@ -229,7 +245,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         }
         create_info := vk.InstanceCreateInfo {
             sType = .INSTANCE_CREATE_INFO,
-            pNext = nil,
+            pNext = &debug_info,
             flags = nil,
             pApplicationInfo = &app_info,
             enabledLayerCount = 0,
@@ -531,6 +547,28 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         vk.GetDeviceQueue(device, gfx_queue_family, 0, &gfx_queue)
         vk.GetDeviceQueue(device, compute_queue_family, 0, &compute_queue)
         vk.GetDeviceQueue(device, transfer_queue_family, 0, &transfer_queue)
+
+        // Debug names
+        name_info := vk.DebugUtilsObjectNameInfoEXT {
+            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+            pNext = nil,
+            objectType = .QUEUE,
+            objectHandle = u64(uintptr(gfx_queue)),
+            pObjectName = "GFX queue"
+        }
+        vk.SetDebugUtilsObjectNameEXT(device, &name_info)
+
+        if compute_queue != gfx_queue {
+            name_info.objectHandle = u64(uintptr(compute_queue))
+            name_info.pObjectName = "Compute queue"
+            vk.SetDebugUtilsObjectNameEXT(device, &name_info)
+        }
+
+        if transfer_queue != gfx_queue {
+            name_info.objectHandle = u64(uintptr(transfer_queue))
+            name_info.pObjectName = "Transfer queue"
+            vk.SetDebugUtilsObjectNameEXT(device, &name_info)
+        }
     }
 
     // Create command buffer state
@@ -808,7 +846,8 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     {
         info := Semaphore_Info {
             type = .TIMELINE,
-            init_value = 0
+            init_value = 0,
+            name = "Transfer timeline"
         }
         gd.transfer_timeline = create_semaphore(&gd, &info)
     }
@@ -888,6 +927,9 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
         }
     }
 
+    sb: strings.Builder
+    defer strings.builder_destroy(&sb)
+    strings.builder_init(&sb, allocator = context.temp_allocator)
     {
         gd := gd
         resize(&gd.swapchain_images, image_count)
@@ -900,11 +942,19 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
             }
             gd.swapchain_images[i] = Image_Handle(hm.insert(&gd.images, im))
 
+            sem_name := fmt.sbprintf(&sb, "Acquire binary #%v", i)
             info := Semaphore_Info {
-                type = .BINARY
+                type = .BINARY,
+                name = strings.unsafe_string_to_cstring(sem_name)
             }
             gd.acquire_semaphores[i] = create_semaphore(gd, &info)
+            strings.builder_reset(&sb)
+
+
+            sem_name = fmt.sbprintf(&sb, "Present binary #%v", i)
+            info.name = strings.unsafe_string_to_cstring(sem_name)
             gd.present_semaphores[i] = create_semaphore(gd, &info)
+            strings.builder_reset(&sb)
         }
     }
 
@@ -985,6 +1035,9 @@ resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
         }
     }
 
+    sb: strings.Builder
+    defer strings.builder_destroy(&sb)
+    strings.builder_init(&sb, allocator = context.temp_allocator)
     {
         clear(&gd.acquire_semaphores)
         clear(&gd.present_semaphores)
@@ -999,11 +1052,19 @@ resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
             hm.remove(&gd.images, hm.Handle(gd.swapchain_images[i]))
             gd.swapchain_images[i] = Image_Handle(hm.insert(&gd.images, im))
 
+            sem_name := fmt.sbprintf(&sb, "Acquire binary #%v", i)
             info := Semaphore_Info {
-                type = .BINARY
+                type = .BINARY,
+                name = strings.unsafe_string_to_cstring(sem_name)
             }
             gd.acquire_semaphores[i] = create_semaphore(gd, &info)
+            strings.builder_reset(&sb)
+
+
+            sem_name = fmt.sbprintf(&sb, "Present binary #%v", i)
+            info.name = strings.unsafe_string_to_cstring(sem_name)
             gd.present_semaphores[i] = create_semaphore(gd, &info)
+            strings.builder_reset(&sb)
         }
     }
 
@@ -1207,6 +1268,7 @@ Image_Create :: struct {
     tiling: vk.ImageTiling,
     usage: vk.ImageUsageFlags,
     alloc_flags: vma.Allocation_Create_Flags,
+    name: cstring
 }
 Image :: struct {
     image: vk.Image,
@@ -1327,6 +1389,39 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
         if vk.CreateImageView(gd.device, &info, gd.alloc_callbacks, &image.image_view) != .SUCCESS {
             log.error("Failed to create image view.")
         }
+    }
+
+    // Set debug names
+    {
+        sb: strings.Builder
+        defer strings.builder_destroy(&sb)
+        strings.builder_init(&sb, allocator = context.temp_allocator)
+        image_name := fmt.sbprintf(&sb, "%v image", image_info.name)
+        name_info := vk.DebugUtilsObjectNameInfoEXT {
+            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+            pNext = nil,
+            objectType = .IMAGE,
+            objectHandle = u64(image.image),
+            pObjectName = strings.unsafe_string_to_cstring(image_name)
+        }
+        if vk.SetDebugUtilsObjectNameEXT(gd.device, &name_info) != .SUCCESS {
+            log.error("Failed to set image's debug name")
+        }
+        strings.builder_reset(&sb)
+
+        view_name := fmt.sbprintf(&sb, "%v image view", image_info.name)
+        name_info = vk.DebugUtilsObjectNameInfoEXT {
+            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+            pNext = nil,
+            objectType = .IMAGE_VIEW,
+            objectHandle = u64(image.image_view),
+            pObjectName = strings.unsafe_string_to_cstring(view_name)
+        }
+        if vk.SetDebugUtilsObjectNameEXT(gd.device, &name_info) != .SUCCESS {
+            log.error("Failed to set image's debug name")
+        }
+
+        strings.builder_reset(&sb)
     }
 
     return Image_Handle(hm.insert(&gd.images, image))
@@ -1706,10 +1801,10 @@ begin_gfx_command_buffer :: proc(
     if gd.frame_count >= u64(gd.frames_in_flight) {
         // Wait on timeline semaphore before starting command buffer execution
         wait_value := gd.frame_count - u64(gd.frames_in_flight) + 1
-        append(&sync_info.wait_ops, Semaphore_Op {
-            semaphore = gfx_timeline_semaphore,
-            value = wait_value
-        })
+        // append(&sync_info.wait_ops, Semaphore_Op {
+        //     semaphore = gfx_timeline_semaphore,
+        //     value = wait_value
+        // })
         
         // CPU-sync to prevent CPU from getting further ahead than
         // the number of frames in flight
@@ -2071,6 +2166,12 @@ cmd_end_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
     vk.CmdEndRenderingKHR(cb)
 }
 
+Semaphore_Info :: struct {
+    type: vk.SemaphoreType,
+    init_value: u64,
+    name: cstring
+}
+
 create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> Semaphore_Handle {
     t_info := vk.SemaphoreTypeCreateInfo {
         sType = .SEMAPHORE_TYPE_CREATE_INFO,
@@ -2087,6 +2188,18 @@ create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> Semapho
     if vk.CreateSemaphore(gd.device, &s_info, gd.alloc_callbacks, &s) != .SUCCESS {
         log.error("Failed to create semaphore.")
     }
+
+    name_info := vk.DebugUtilsObjectNameInfoEXT {
+        sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+        pNext = nil,
+        objectType = .SEMAPHORE,
+        objectHandle = u64(s),
+        pObjectName = info.name
+    }
+    if vk.SetDebugUtilsObjectNameEXT(gd.device, &name_info) != .SUCCESS {
+        log.error("Failed to set semaphore's debug name")
+    }
+
     return Semaphore_Handle(hm.insert(&gd.semaphores, s))
 }
 
