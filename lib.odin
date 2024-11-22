@@ -155,7 +155,7 @@ API_Version :: enum {
     Vulkan13
 }
 
-debug_utils_callback :: proc "stdcall" (
+debug_utils_callback :: proc "system" (
     messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT,
     messageTypes: vk.DebugUtilsMessageTypeFlagsEXT,
     pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT,
@@ -163,6 +163,10 @@ debug_utils_callback :: proc "stdcall" (
 ) -> b32 {
     message := pCallbackData.pMessage
     return true
+}
+
+string_from_bytes :: proc(bytes: []u8) -> string {
+    return strings.string_from_null_terminated_ptr(&bytes[0], len(bytes))
 }
 
 Init_Parameters :: struct {
@@ -289,6 +293,8 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             props.sType = .PHYSICAL_DEVICE_PROPERTIES_2
             props.pNext = &vk12_props
             vk.GetPhysicalDeviceProperties2(pd, &props)
+            
+            log.debugf("Considering physical device:\n%v", string_from_bytes(props.properties.deviceName[:]))
 
             // @TODO: Do something more sophisticated than picking the first DISCRETE_GPU
             if props.properties.deviceType == .DISCRETE_GPU {
@@ -321,7 +327,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 if has_right_features {
                     phys_device = pd
                     properties = props
-                    log.infof("Chosen GPU: %s", string(props.properties.deviceName[:]))
+                    log.infof("Chosen GPU: %s", string_from_bytes(props.properties.deviceName[:]))
                     break
                 }
             }
@@ -1901,7 +1907,8 @@ begin_gfx_command_buffer :: proc(
                 pending_image := queue.pop_front(&gd.pending_images)
                 underlying_image, ok := get_image(gd, pending_image.handle)
                 if !ok {
-                    log.error("Couldn't get pending image from handle")
+                    log.errorf("Couldn't get pending image from handle %v", pending_image.handle)
+                    continue
                 }
                 
                 barriers := []Image_Barrier {
