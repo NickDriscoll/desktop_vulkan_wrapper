@@ -549,25 +549,14 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         vk.GetDeviceQueue(device, transfer_queue_family, 0, &transfer_queue)
 
         // Debug names
-        name_info := vk.DebugUtilsObjectNameInfoEXT {
-            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
-            pNext = nil,
-            objectType = .QUEUE,
-            objectHandle = u64(uintptr(gfx_queue)),
-            pObjectName = "GFX queue"
-        }
-        vk.SetDebugUtilsObjectNameEXT(device, &name_info)
+        assign_debug_name(device, .QUEUE, u64(uintptr(gfx_queue)), "GFX Queue")
 
         if compute_queue != gfx_queue {
-            name_info.objectHandle = u64(uintptr(compute_queue))
-            name_info.pObjectName = "Compute queue"
-            vk.SetDebugUtilsObjectNameEXT(device, &name_info)
+            assign_debug_name(device, .QUEUE, u64(uintptr(compute_queue)), "Compute Queue")
         }
 
         if transfer_queue != gfx_queue {
-            name_info.objectHandle = u64(uintptr(transfer_queue))
-            name_info.pObjectName = "Transfer queue"
-            vk.SetDebugUtilsObjectNameEXT(device, &name_info)
+            assign_debug_name(device, .QUEUE, u64(uintptr(transfer_queue)), "Transfer Queue")
         }
     }
 
@@ -585,6 +574,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         if vk.CreateCommandPool(device, &gfx_pool_info, allocation_callbacks, &gfx_command_pool) != .SUCCESS {
             log.error("Failed to create gfx command pool")
         }
+        assign_debug_name(device, .COMMAND_POOL, u64(gfx_command_pool), "GFX Command Pool")
         
         compute_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
@@ -595,6 +585,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         if vk.CreateCommandPool(device, &compute_pool_info, allocation_callbacks, &compute_command_pool) != .SUCCESS {
             log.error("Failed to create compute command pool")
         }
+        assign_debug_name(device, .COMMAND_POOL, u64(compute_command_pool), "Compute Command Pool")
         
         transfer_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
@@ -605,6 +596,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         if vk.CreateCommandPool(device, &transfer_pool_info, allocation_callbacks, &transfer_command_pool) != .SUCCESS {
             log.error("Failed to create transfer command pool")
         }
+        assign_debug_name(device, .COMMAND_POOL, u64(transfer_command_pool), "Transfer Command Pool")
     }
 
     // Create command buffers
@@ -644,6 +636,29 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         }
         if vk.AllocateCommandBuffers(device, &transfer_info, raw_data(transfer_command_buffers)) != .SUCCESS {
             log.error("Failed to create transfer command buffers")
+        }
+
+        // Debug naming
+        sb: strings.Builder
+        defer strings.builder_destroy(&sb)
+        strings.builder_init(&sb, allocator = context.temp_allocator)
+        for i in 0..<frames_in_flight {
+            my_name := fmt.sbprintf(&sb, "GFX Command Buffer #%v", i)
+            c_name := strings.unsafe_string_to_cstring(my_name)
+            assign_debug_name(device, .COMMAND_BUFFER, u64(uintptr(gfx_command_buffers[i])), c_name)
+            strings.builder_reset(&sb)
+        }
+        for i in 0..<frames_in_flight {
+            my_name := fmt.sbprintf(&sb, "Compute Command Buffer #%v", i)
+            c_name := strings.unsafe_string_to_cstring(my_name)
+            assign_debug_name(device, .COMMAND_BUFFER, u64(uintptr(compute_command_buffers[i])), c_name)
+            strings.builder_reset(&sb)
+        }
+        for i in 0..<frames_in_flight {
+            my_name := fmt.sbprintf(&sb, "Transfer Command Buffer #%v", i)
+            c_name := strings.unsafe_string_to_cstring(my_name)
+            assign_debug_name(device, .COMMAND_BUFFER, u64(uintptr(transfer_command_buffers[i])), c_name)
+            strings.builder_reset(&sb)
         }
     }
 
@@ -699,8 +714,15 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 maxAnisotropy = 16.0
             })
 
+            debug_names : []cstring = {
+                "Aniso 16 Sampler",
+                "Point Sampler",
+                "PostFX Sampler",
+            }
+
             for &s, i in sampler_infos {
                 vk.CreateSampler(device, &s, allocation_callbacks, &samplers[i])
+                assign_debug_name(device, .SAMPLER, u64(samplers[i]), debug_names[i])
             }
         }
 
@@ -853,6 +875,20 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     }
 
     return gd
+}
+
+assign_debug_name :: proc(device: vk.Device, object_type: vk.ObjectType, object_handle: u64, name: cstring) {
+    name_info := vk.DebugUtilsObjectNameInfoEXT {
+        sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+        pNext = nil,
+        objectType = object_type,
+        objectHandle = object_handle,
+        pObjectName = name
+    }
+    r := vk.SetDebugUtilsObjectNameEXT(device, &name_info)
+    if r != .SUCCESS {
+        log.errorf("Failed to set object's debug name: %v", r)
+    }
 }
 
 init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
@@ -1283,12 +1319,11 @@ Image_Delete :: struct {
     allocation: vma.Allocation
 }
 Pending_Image :: struct {
-    image: vk.Image,
-    view: vk.ImageView,
+    handle: Image_Handle,
     old_layout: vk.ImageLayout,
     new_layout: vk.ImageLayout,
     aspect_mask: vk.ImageAspectFlags,
-    is_transfer: bool
+    src_queue_family: u32
 }
 
 create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> Image_Handle {
@@ -1440,12 +1475,11 @@ new_bindless_image :: proc(gd: ^Graphics_Device, using info: ^Image_Create, layo
     }
 
     queue.push_back(&gd.pending_images, Pending_Image {
-        image = image.image,
-        view = image.image_view,
+        handle = handle,
         old_layout = .UNDEFINED,
         new_layout = layout,
         aspect_mask = aspect_mask,
-        is_transfer = false
+        src_queue_family = gd.gfx_queue_family
     })
 
     
@@ -1469,8 +1503,8 @@ new_bindless_image :: proc(gd: ^Graphics_Device, using info: ^Image_Create, layo
         {
             src_stage_mask = {.ALL_COMMANDS},
             src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
-            //dst_stage_mask = {.ALL_GRAPHICS}, Ignored during release operation
-            //dst_access_mask = {.SHADER_READ}, Ignored during release operation
+            dst_stage_mask = {.ALL_COMMANDS},                                 //Ignored during release operation
+            dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},                   //Ignored during release operation
             old_layout = .UNDEFINED,
             new_layout = layout,
             src_queue_family = gd.transfer_queue_family,
@@ -1548,7 +1582,7 @@ get_image_vkhandle :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (h: vk
     return im.image, true
 }
 
-// Blocking function for writing to a GPU image
+// Blocking function for creating a new GPU image with initial data
 // Use when the data is small or if you don't care about stalling
 sync_create_image_with_data :: proc(
     gd: ^Graphics_Device,
@@ -1645,8 +1679,8 @@ sync_create_image_with_data :: proc(
                 {
                     src_stage_mask = {.ALL_COMMANDS},
                     src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
-                    //dst_stage_mask = {.ALL_GRAPHICS}, Ignored during release operation
-                    //dst_access_mask = {.SHADER_READ}, Ignored during release operation
+                    dst_stage_mask = {.ALL_COMMANDS},                      // Ignored during release operation
+                    dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},        // Ignored during release operation
                     old_layout = .TRANSFER_DST_OPTIMAL,
                     new_layout = .SHADER_READ_ONLY_OPTIMAL,
                     src_queue_family = gd.transfer_queue_family,
@@ -1723,14 +1757,14 @@ sync_create_image_with_data :: proc(
         aspect_mask = {.DEPTH}
     }
 
-    queue.push_back(&gd.pending_images, Pending_Image {
-        image = out_image.image,
-        view = out_image.image_view,
+    pending_image := Pending_Image {
+        handle = out_handle,
         old_layout = .TRANSFER_DST_OPTIMAL,
         new_layout = .SHADER_READ_ONLY_OPTIMAL,
         aspect_mask = aspect_mask,
-        is_transfer = true
-    })
+        src_queue_family = gd.transfer_queue_family
+    }
+    queue.push_back(&gd.pending_images, pending_image)
 
     ok = true
     return
@@ -1818,8 +1852,9 @@ begin_gfx_command_buffer :: proc(
             pSemaphores = sem,
             pValues = &wait_value
         }
-        if vk.WaitSemaphores(gd.device, &info, max(u64)) != .SUCCESS {
-            log.error("Failed to wait for timeline semaphore CPU-side man what")
+        res := vk.WaitSemaphores(gd.device, &info, max(u64))
+        if res != .SUCCESS {
+            log.errorf("CPU failed to wait for timeline semaphore: %v", res)
         }
     }
 
@@ -1858,31 +1893,30 @@ begin_gfx_command_buffer :: proc(
         defer delete(d_image_infos)
         d_writes: [dynamic]vk.WriteDescriptorSet
         defer delete(d_writes)
-        
-        current_image_idx := 0
 
         // Record queue family ownership transfer for in-flight images
         {
             write_ct := 0
             for queue.len(gd.pending_images) > 0 {
-                iter_image := queue.pop_front(&gd.pending_images)
-
-                src_queue_family := gd.gfx_queue_family
-                if iter_image.is_transfer do src_queue_family = gd.transfer_queue_family
+                pending_image := queue.pop_front(&gd.pending_images)
+                underlying_image, ok := get_image(gd, pending_image.handle)
+                if !ok {
+                    log.error("Couldn't get pending image from handle")
+                }
                 
                 barriers := []Image_Barrier {
                     {
-                        //src_stage_mask = {.TRANSFER},             Ignored in acquire operation
-                        //src_access_mask = {.TRANSFER_WRITE},      Ignored in acquire operation
+                        src_stage_mask = {.ALL_COMMANDS},                       // Ignored in acquire operation
+                        src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},         // Ignored in acquire operation
                         dst_stage_mask = {.ALL_COMMANDS},
                         dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
-                        old_layout = iter_image.old_layout,
-                        new_layout = iter_image.new_layout,
-                        src_queue_family = gd.transfer_queue_family,
+                        old_layout = pending_image.old_layout,
+                        new_layout = pending_image.new_layout,
+                        src_queue_family = pending_image.src_queue_family,
                         dst_queue_family = gd.gfx_queue_family,
-                        image = iter_image.image,
+                        image = underlying_image.image,
                         subresource_range = {
-                            aspectMask = iter_image.aspect_mask,
+                            aspectMask = pending_image.aspect_mask,
                             baseMipLevel = 0,
                             levelCount = 1,
                             baseArrayLayer = 0,
@@ -1895,9 +1929,8 @@ begin_gfx_command_buffer :: proc(
                 // @TODO: Record mipmap generation commands
 
                 // Save descriptor update data
-                for gd.images.values[current_image_idx].image_view != iter_image.view do current_image_idx += 1
                 append(&d_image_infos, vk.DescriptorImageInfo {
-                    imageView = iter_image.view,
+                    imageView = underlying_image.image_view,
                     imageLayout = .SHADER_READ_ONLY_OPTIMAL
                 })
                 append(&d_writes, vk.WriteDescriptorSet {
@@ -1905,7 +1938,7 @@ begin_gfx_command_buffer :: proc(
                     pNext = nil,
                     dstSet = gd.descriptor_set,
                     dstBinding = u32(Bindless_Descriptor_Bindings.Images),
-                    dstArrayElement = u32(current_image_idx),
+                    dstArrayElement = u32(pending_image.handle.index),
                     descriptorCount = 1,
                     descriptorType = .SAMPLED_IMAGE,
                     pImageInfo = &d_image_infos[write_ct]
