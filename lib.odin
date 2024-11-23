@@ -1334,7 +1334,9 @@ Pending_Image :: struct {
 
 create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> Image_Handle {
     // TRANSFER_DST is required for layout transitions period.
-    usage += {.TRANSFER_DST}
+    // SAMPLED is required because all images in the system are
+    // available in the bindless images array
+    usage += {.SAMPLED,.TRANSFER_DST}
 
     // Calculate mipmap count
     mip_count : u32 = 1
