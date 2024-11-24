@@ -1,24 +1,41 @@
-// Implementation from https://gist.github.com/gingerBill/7282ff54744838c52cc80c559f697051
+// Implementation based on gingerBill's
+// https://gist.github.com/gingerBill/7282ff54744838c52cc80c559f697051
 
 package handlemap
 import "base:builtin"
-
-Handle_Map :: struct($T: typeid) {
-	handles:        [dynamic]Handle,
-	values:         [dynamic]T,
-	sparse_indices: [dynamic]Sparse_Index,
-	next:           u32,
-}
 
 Handle :: struct {
 	generation: u32,
 	index:      u32,
 }
 
+handle_to_rawptr :: proc(using h: $T/Handle) -> rawptr {
+	u: uintptr
+	u |= (uintptr(generation) << 32)
+	u |= (uintptr(index) << 0)
+	return rawptr(u)
+}
+
+rawptr_to_handle :: proc(r: rawptr) -> Handle {
+	u := uintptr(r)
+
+	return Handle {
+		generation = u32(u >> 32),
+		index = u32(u & 0xFFFFFFFF)
+	}
+}
+
 @(private)
 Sparse_Index :: struct {
 	generation:    u32,
 	index_or_next: u32,
+}
+
+Handle_Map :: struct($T: typeid) {
+	handles:        [dynamic]Handle,
+	values:         [dynamic]T,
+	sparse_indices: [dynamic]Sparse_Index,
+	next:           u32,
 }
 
 init :: proc(m: ^$M/Handle_Map($T), allocator := context.allocator) {
