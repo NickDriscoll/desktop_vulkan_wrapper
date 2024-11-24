@@ -2231,16 +2231,21 @@ create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> Semapho
         log.error("Failed to create semaphore.")
     }
 
-    name_info := vk.DebugUtilsObjectNameInfoEXT {
-        sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
-        pNext = nil,
-        objectType = .SEMAPHORE,
-        objectHandle = u64(s),
-        pObjectName = info.name
+    if len(info.name) > 0 {
+        name_info := vk.DebugUtilsObjectNameInfoEXT {
+            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+            pNext = nil,
+            objectType = .SEMAPHORE,
+            objectHandle = u64(s),
+            pObjectName = info.name
+        }
+        if vk.SetDebugUtilsObjectNameEXT(gd.device, &name_info) != .SUCCESS {
+            log.error("Failed to set semaphore's debug name")
+        }
+    } else {
+        log.warn("Semaphore was created without a debug name")
     }
-    if vk.SetDebugUtilsObjectNameEXT(gd.device, &name_info) != .SUCCESS {
-        log.error("Failed to set semaphore's debug name")
-    }
+
 
     return Semaphore_Handle(hm.insert(&gd.semaphores, s))
 }
