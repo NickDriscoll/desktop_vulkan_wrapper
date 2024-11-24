@@ -1316,7 +1316,8 @@ Image :: struct {
     image: vk.Image,
     image_view: vk.ImageView,
     allocation: vma.Allocation,
-    alloc_info: vma.Allocation_Info
+    alloc_info: vma.Allocation_Info,
+    extent: vk.Extent3D
 }
 Image_Delete :: struct {
     death_frame: u64,
@@ -1396,6 +1397,7 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
             log.error("Failed to create image.")
         }
     }
+    image.extent = extent
 
     // Create the image view
     {
