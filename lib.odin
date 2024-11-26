@@ -57,6 +57,20 @@ Sync_Info :: struct {
     signal_ops: [dynamic]Semaphore_Op,
 }
 
+add_wait_op :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle, value: u64) {
+    append(&wait_ops, Semaphore_Op {
+        semaphore = handle,
+        value = value
+    })
+}
+
+add_signal_op :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle, value: u64) {
+    append(&signal_ops, Semaphore_Op {
+        semaphore = handle,
+        value = value
+    })
+}
+
 delete_sync_info :: proc(using s: ^Sync_Info) {
     delete(wait_ops)
     delete(signal_ops)
@@ -2174,7 +2188,7 @@ cmd_set_scissor :: proc(
 cmd_push_constants_gfx :: proc($Struct_Type: typeid, gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, in_struct: ^Struct_Type) {
     cb := gd.gfx_command_buffers[cb_idx]
     byte_count : u32 = u32(size_of(Struct_Type))
-    vk.CmdPushConstants(cb, gd.pipeline_layout, {.VERTEX,.FRAGMENT}, 0, byte_count, in_struct);
+    vk.CmdPushConstants(cb, gd.pipeline_layout, {.VERTEX,.FRAGMENT}, 0, byte_count, in_struct)
 }
 
 cmd_bind_index_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, buffer: Buffer_Handle) -> bool {
