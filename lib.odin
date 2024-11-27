@@ -32,7 +32,8 @@ TOTAL_SAMPLERS :: len(Immutable_Sampler_Index)
 
 // Sizes in bytes
 PUSH_CONSTANTS_SIZE :: 128
-STAGING_BUFFER_SIZE :: 128 * 1024 * 1024
+STAGING_BUFFER_SIZE :: 16 * 1024 * 1024
+//STAGING_BUFFER_SIZE :: 128 * 1024 * 1024
 
 IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
     r = .R,
