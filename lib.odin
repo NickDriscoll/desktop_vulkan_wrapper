@@ -1117,16 +1117,17 @@ get_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> (^Buffer, boo
 // Blocking function for writing to a GPU buffer
 // Use when the data is small or if you don't care about stalling
 sync_write_buffer :: proc(
-    $Element_Type: typeid,
     gd: ^Graphics_Device,
     out_buffer: Buffer_Handle,
-    in_slice: []Element_Type,
+    in_slice: []$Element_Type,
     base_offset : u32 = 0
 ) -> bool {
+    if len(in_slice) == 0 do return false
+
     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
     out_buf := hm.get(&gd.buffers, hm.Handle(out_buffer)) or_return
     semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
-    in_bytes := slice.from_ptr(slice.as_ptr(in_slice), len(in_slice) * size_of(Element_Type))
+    in_bytes : []byte = slice.from_ptr(cast([^]byte)slice.as_ptr(in_slice), len(in_slice) * size_of(Element_Type))
     base_offset_bytes := base_offset * size_of(Element_Type)
     
     total_bytes := len(in_bytes)
