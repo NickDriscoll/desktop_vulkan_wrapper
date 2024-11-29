@@ -912,115 +912,9 @@ assign_debug_name :: proc(device: vk.Device, object_type: vk.ObjectType, object_
     }
 }
 
-init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
-    if !sdl2.Vulkan_CreateSurface(window, gd.instance, &gd.surface) do return false
-
-    width, height : i32 = 0, 0
-    sdl2.Vulkan_GetDrawableSize(window, &width, &height)
-
-    // @TODO: Allow more configurability of swapchain options
-    // particularly pertaining to presentation mode and image format
-    image_format := vk.Format.B8G8R8A8_SRGB
-    create_info := vk.SwapchainCreateInfoKHR {
-        sType = .SWAPCHAIN_CREATE_INFO_KHR,
-        pNext = nil,
-        flags = nil,
-        surface = gd.surface,
-        minImageCount = gd.frames_in_flight,
-        imageFormat = image_format,
-        imageColorSpace = .SRGB_NONLINEAR,
-        imageExtent = vk.Extent2D {
-            width = u32(width),
-            height = u32(height)
-        },
-        imageArrayLayers = 1,
-        imageUsage = {.COLOR_ATTACHMENT},
-        imageSharingMode = .EXCLUSIVE,
-        queueFamilyIndexCount = 1,
-        pQueueFamilyIndices = &gd.gfx_queue_family,
-        preTransform = {.IDENTITY},
-        compositeAlpha = {.OPAQUE},
-        presentMode = .FIFO,
-        clipped = true,
-        oldSwapchain = 0
-    }
-    if vk.CreateSwapchainKHR(gd.device, &create_info, gd.alloc_callbacks, &gd.swapchain) != .SUCCESS {
-        return false
-    }
-
-    // Get swapchain images
-    image_count : u32 = 0
-    swapchain_images: [dynamic]vk.Image
-    defer delete(swapchain_images)
-    {
-        vk.GetSwapchainImagesKHR(gd.device, gd.swapchain, &image_count, nil)
-        resize(&swapchain_images, image_count)
-        vk.GetSwapchainImagesKHR(gd.device, gd.swapchain, &image_count, raw_data(swapchain_images))
-    }
-    
-    swapchain_image_views: [dynamic]vk.ImageView
-    defer delete(swapchain_image_views)
-    resize(&swapchain_image_views, image_count)
-    // Create image views for the swapchain images for rendering
-    {
-        for vkimage, i in swapchain_images {
-            info := vk.ImageViewCreateInfo {
-                sType = .IMAGE_VIEW_CREATE_INFO,
-                pNext = nil,
-                flags = nil,
-                image = vkimage,
-                viewType = .D2,
-                format = image_format,
-                components = IDENTITY_COMPONENT_SWIZZLE,
-                subresourceRange = {
-                    aspectMask = {.COLOR},
-                    baseMipLevel = 0,
-                    levelCount = 1,
-                    baseArrayLayer = 0,
-                    layerCount = 1
-                }
-            }
-            vk.CreateImageView(gd.device, &info, gd.alloc_callbacks, &swapchain_image_views[i])
-        }
-    }
-
-    sb: strings.Builder
-    defer strings.builder_destroy(&sb)
-    strings.builder_init(&sb, allocator = context.temp_allocator)
-    {
-        gd := gd
-        resize(&gd.swapchain_images, image_count)
-        resize(&gd.acquire_semaphores, image_count)
-        resize(&gd.present_semaphores, image_count)
-        for i : u32 = 0; i < image_count; i += 1 {
-            im := Image {
-                image = swapchain_images[i],
-                image_view = swapchain_image_views[i]
-            }
-            gd.swapchain_images[i] = Image_Handle(hm.insert(&gd.images, im))
-
-            sem_name := fmt.sbprintf(&sb, "Acquire binary #%v", i)
-            info := Semaphore_Info {
-                type = .BINARY,
-                name = strings.unsafe_string_to_cstring(sem_name)
-            }
-            gd.acquire_semaphores[i] = create_semaphore(gd, &info)
-            strings.builder_reset(&sb)
-
-
-            sem_name = fmt.sbprintf(&sb, "Present binary #%v", i)
-            info.name = strings.unsafe_string_to_cstring(sem_name)
-            gd.present_semaphores[i] = create_semaphore(gd, &info)
-            strings.builder_reset(&sb)
-        }
-    }
-
-    return true
-}
-
-resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
-    // The graphics device's swapchain should exist
-    assert(gd.swapchain != 0)
+window_helper_plz_rename :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
+    // surface_caps := 
+    // vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gd.physical_device, gd.surface)
 
     // @TODO: Allow more configurability of swapchain options
     // particularly pertaining to presentation mode and image format
@@ -1101,12 +995,12 @@ resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
         gd := gd
         resize(&gd.acquire_semaphores, image_count)
         resize(&gd.present_semaphores, image_count)
+        resize(&gd.swapchain_images, image_count)
         for i : u32 = 0; i < image_count; i += 1 {
             im := Image {
                 image = swapchain_images[i],
                 image_view = swapchain_image_views[i]
             }
-            hm.remove(&gd.images, hm.Handle(gd.swapchain_images[i]))
             gd.swapchain_images[i] = Image_Handle(hm.insert(&gd.images, im))
 
             sem_name := fmt.sbprintf(&sb, "Acquire binary #%v", i)
@@ -1124,6 +1018,33 @@ resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
             strings.builder_reset(&sb)
         }
     }
+
+    return true
+}
+
+init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
+    if !sdl2.Vulkan_CreateSurface(window, gd.instance, &gd.surface) do return false
+
+    width, height : i32 = 0, 0
+    sdl2.Vulkan_GetDrawableSize(window, &width, &height)
+
+    window_helper_plz_rename(gd, {u32(width), u32(height)})
+
+    return true
+}
+
+resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
+    // The graphics device's swapchain should exist
+    assert(gd.swapchain != 0)
+
+    old_swapchain_handles := make([dynamic]Image_Handle, len(gd.swapchain_images), context.temp_allocator)
+    defer delete(old_swapchain_handles)
+    for handle, i in gd.swapchain_images do old_swapchain_handles[i] = handle
+
+    window_helper_plz_rename(gd, new_dims)
+
+    // Remove stale swapchain image handles
+    for handle in old_swapchain_handles do hm.remove(&gd.images, hm.Handle(handle))
 
     return true
 }
