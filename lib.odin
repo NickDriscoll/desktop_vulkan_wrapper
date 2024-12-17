@@ -1125,7 +1125,7 @@ sync_write_buffer :: proc(
     if len(in_slice) == 0 do return false
 
     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
-    out_buf := hm.get(&gd.buffers, hm.Handle(out_buffer)) or_return
+    out_buf := get_buffer(gd, out_buffer) or_return
     semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
     in_bytes : []byte = slice.from_ptr(cast([^]byte)slice.as_ptr(in_slice), len(in_slice) * size_of(Element_Type))
     base_offset_bytes := base_offset * size_of(Element_Type)
@@ -1140,7 +1140,7 @@ sync_write_buffer :: proc(
     } else {
 
         // Staging buffer
-        sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
+        sb := get_buffer(gd, gd.staging_buffer) or_return
         sb_ptr := sb.alloc_info.mapped_data
     
         for bytes_transferred < total_bytes {
@@ -1223,7 +1223,7 @@ sync_write_buffer :: proc(
 }
 
 delete_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> bool {
-    buffer := hm.get(&gd.buffers, hm.Handle(handle)) or_return
+    buffer := get_buffer(gd, handle) or_return
 
     buffer_delete := Buffer_Delete {
         death_frame = gd.frame_count + u64(gd.frames_in_flight),
@@ -2116,7 +2116,7 @@ cmd_push_constants_gfx :: proc($Struct_Type: typeid, gd: ^Graphics_Device, cb_id
 
 cmd_bind_index_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, buffer: Buffer_Handle) -> bool {
     cb := gd.gfx_command_buffers[cb_idx]
-    b := hm.get(&gd.buffers, hm.Handle(buffer)) or_return
+    b := get_buffer(gd, buffer) or_return
     vk.CmdBindIndexBuffer(cb, b.buffer, 0, .UINT16)
 
     return true
@@ -2130,7 +2130,7 @@ cmd_draw_indexed_indirect :: proc(
     draw_count: u32
 ) -> bool {
     cb := gd.gfx_command_buffers[cb_idx]
-    draw_buffer := hm.get(&gd.buffers, hm.Handle(draw_buffer_handle)) or_return
+    draw_buffer := get_buffer(gd, draw_buffer_handle) or_return
     vk.CmdDrawIndexedIndirect(
         cb,
         draw_buffer.buffer,
