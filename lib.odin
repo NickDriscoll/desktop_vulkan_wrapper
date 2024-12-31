@@ -1028,7 +1028,7 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
     width, height : i32 = 0, 0
     sdl2.Vulkan_GetDrawableSize(window, &width, &height)
 
-    window_helper_plz_rename(gd, {u32(width), u32(height)})
+    window_helper_plz_rename(gd, {u32(width), u32(height)}) or_return
 
     return true
 }
