@@ -898,6 +898,22 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     return gd
 }
 
+quit_vulkan :: proc(gd: ^Graphics_Device) {
+    delete(gd.acquire_semaphores)
+    delete(gd.present_semaphores)
+    delete(gd.swapchain_images)
+    delete(gd.gfx_command_buffers)
+    delete(gd.compute_command_buffers)
+    delete(gd.transfer_command_buffers)
+    queue.destroy(&gd.pending_images)
+    queue.destroy(&gd.buffer_deletes)
+    queue.destroy(&gd.image_deletes)
+    hm.destroy(&gd.buffers)
+    hm.destroy(&gd.images)
+    hm.destroy(&gd.semaphores)
+    hm.destroy(&gd.pipelines)
+}
+
 assign_debug_name :: proc(device: vk.Device, object_type: vk.ObjectType, object_handle: u64, name: cstring) {
     name_info := vk.DebugUtilsObjectNameInfoEXT {
         sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
