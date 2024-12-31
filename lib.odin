@@ -1041,7 +1041,7 @@ resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
     defer delete(old_swapchain_handles)
     for handle, i in gd.swapchain_images do old_swapchain_handles[i] = handle
 
-    window_helper_plz_rename(gd, new_dims)
+    window_helper_plz_rename(gd, new_dims) or_return
 
     // Remove stale swapchain image handles
     for handle in old_swapchain_handles do hm.remove(&gd.images, hm.Handle(handle))
