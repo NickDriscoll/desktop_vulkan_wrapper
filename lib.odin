@@ -18,6 +18,12 @@ import hm "handlemap"
 
 MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
 
+// Sizes in bytes
+PUSH_CONSTANTS_SIZE :: 128
+STAGING_BUFFER_SIZE :: 16 * 1024 * 1024
+
+// All buffers are read/written by the GPU using Buffer Device Address
+// As such, we only need descriptor slots for images and samplers
 Bindless_Descriptor_Bindings :: enum u32 {
     Images = 0,
     Samplers = 1
@@ -28,12 +34,7 @@ Immutable_Sampler_Index :: enum u32 {
     Point = 1,
     PostFX = 2
 }
-TOTAL_SAMPLERS :: len(Immutable_Sampler_Index)
-
-// Sizes in bytes
-PUSH_CONSTANTS_SIZE :: 128
-STAGING_BUFFER_SIZE :: 16 * 1024 * 1024
-//STAGING_BUFFER_SIZE :: 128 * 1024 * 1024
+TOTAL_IMMUTABLE_SAMPLERS :: len(Immutable_Sampler_Index)
 
 IDENTITY_COMPONENT_SWIZZLE :: vk.ComponentMapping {
     r = .R,
@@ -133,7 +134,7 @@ Graphics_Device :: struct {
     // buffers via their device addresses and
     // images through this global descriptor set
     // i.e. all bindless all the time, baby
-    immutable_samplers: [TOTAL_SAMPLERS]vk.Sampler,
+    immutable_samplers: [TOTAL_IMMUTABLE_SAMPLERS]vk.Sampler,
     descriptor_set_layout: vk.DescriptorSetLayout,
     descriptor_pool: vk.DescriptorPool,
     descriptor_set: vk.DescriptorSet,
@@ -684,14 +685,14 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     }
 
     // Create bindless descriptor set
-    samplers: [TOTAL_SAMPLERS]vk.Sampler
+    samplers: [TOTAL_IMMUTABLE_SAMPLERS]vk.Sampler
     ds_layout: vk.DescriptorSetLayout
     dp: vk.DescriptorPool
     ds: vk.DescriptorSet
     {
         // Create immutable samplers
         {
-            sampler_infos := make([dynamic]vk.SamplerCreateInfo, len = 0, cap = TOTAL_SAMPLERS, allocator = context.temp_allocator)
+            sampler_infos := make([dynamic]vk.SamplerCreateInfo, len = 0, cap = TOTAL_IMMUTABLE_SAMPLERS, allocator = context.temp_allocator)
             defer delete(sampler_infos)
             append(&sampler_infos, vk.SamplerCreateInfo {
                 sType = .SAMPLER_CREATE_INFO,
@@ -757,7 +758,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         sampler_binding := vk.DescriptorSetLayoutBinding {
             binding = u32(Bindless_Descriptor_Bindings.Samplers),
             descriptorType = .SAMPLER,
-            descriptorCount = TOTAL_SAMPLERS,
+            descriptorCount = TOTAL_IMMUTABLE_SAMPLERS,
             stageFlags = {.FRAGMENT},
             pImmutableSamplers = raw_data(samplers[:])
         }
@@ -789,7 +790,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             },
             vk.DescriptorPoolSize {
                 type = .SAMPLER,
-                descriptorCount = TOTAL_SAMPLERS
+                descriptorCount = TOTAL_IMMUTABLE_SAMPLERS
             }
         }
 
@@ -1132,6 +1133,7 @@ get_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> (^Buffer, boo
 
 // Blocking function for writing to a GPU buffer
 // Use when the data is small or if you don't care about stalling
+// @TODO: Maybe add sync_write_buffers()?
 sync_write_buffer :: proc(
     gd: ^Graphics_Device,
     out_buffer: Buffer_Handle,
