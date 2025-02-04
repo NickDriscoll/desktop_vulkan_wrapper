@@ -95,7 +95,7 @@ Graphics_Device :: struct {
     physical_device: vk.PhysicalDevice,
     physical_device_properties: vk.PhysicalDeviceProperties2,
     device: vk.Device,
-    pipeline_cache: vk.PipelineCache,
+    pipeline_cache: vk.PipelineCache,       // @TODO: Actually use pipeline cache
     alloc_callbacks: ^vk.AllocationCallbacks,
     allocator: vma.Allocator,
     frames_in_flight: u32,
