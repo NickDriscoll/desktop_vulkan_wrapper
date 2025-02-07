@@ -171,6 +171,7 @@ API_Version :: enum {
     Vulkan13
 }
 
+// @TODO: What am I doing with this?
 debug_utils_callback :: proc "system" (
     messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT,
     messageTypes: vk.DebugUtilsMessageTypeFlagsEXT,
@@ -881,7 +882,8 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             size = STAGING_BUFFER_SIZE,
             usage = {.TRANSFER_SRC},
             alloc_flags = {.Mapped},
-            required_flags = {.DEVICE_LOCAL,.HOST_VISIBLE,.HOST_COHERENT}
+            required_flags = {.DEVICE_LOCAL,.HOST_VISIBLE,.HOST_COHERENT},
+            name = "Global staging buffer",
         }
         gd.staging_buffer = create_buffer(&gd, &info)
     }
@@ -1075,20 +1077,21 @@ Buffer_Info :: struct {
     usage: vk.BufferUsageFlags,
     alloc_flags: vma.Allocation_Create_Flags,
     // queue_family: Queue_Family,
-    required_flags: vk.MemoryPropertyFlags
+    required_flags: vk.MemoryPropertyFlags,
+    name: string,
 }
 
 Buffer :: struct {
     buffer: vk.Buffer,
     address: vk.DeviceAddress,
     allocation: vma.Allocation,
-    alloc_info: vma.Allocation_Info
+    alloc_info: vma.Allocation_Info,
 }
 
 Buffer_Delete :: struct {
     death_frame: u64,
     buffer: vk.Buffer,
-    allocation: vma.Allocation
+    allocation: vma.Allocation,
 }
 
 create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Handle {
@@ -1123,6 +1126,12 @@ create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Ha
         buffer = b.buffer
     }
     b.address = vk.GetBufferDeviceAddressKHR(gd.device, &bda_info)
+
+    if len(buf_info.name) > 0 {
+        assign_debug_name(gd.device, .BUFFER, u64(b.buffer), strings.unsafe_string_to_cstring(buf_info.name))
+    } else {
+        log.warn("Buffer was created without a debug name")
+    }
 
     return Buffer_Handle(hm.insert(&gd.buffers, b))
 }
@@ -1392,36 +1401,19 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
     }
 
     // Set debug names
-    {
+    if len(name) > 0 {
         sb: strings.Builder
         defer strings.builder_destroy(&sb)
         strings.builder_init(&sb, allocator = context.temp_allocator)
         image_name := fmt.sbprintf(&sb, "%v image", image_info.name)
-        name_info := vk.DebugUtilsObjectNameInfoEXT {
-            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
-            pNext = nil,
-            objectType = .IMAGE,
-            objectHandle = u64(image.image),
-            pObjectName = strings.unsafe_string_to_cstring(image_name)
-        }
-        if vk.SetDebugUtilsObjectNameEXT(gd.device, &name_info) != .SUCCESS {
-            log.error("Failed to set image's debug name")
-        }
+        assign_debug_name(gd.device, .IMAGE, u64(image.image), strings.unsafe_string_to_cstring(image_name))
         strings.builder_reset(&sb)
 
         view_name := fmt.sbprintf(&sb, "%v image view", image_info.name)
-        name_info = vk.DebugUtilsObjectNameInfoEXT {
-            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
-            pNext = nil,
-            objectType = .IMAGE_VIEW,
-            objectHandle = u64(image.image_view),
-            pObjectName = strings.unsafe_string_to_cstring(view_name)
-        }
-        if vk.SetDebugUtilsObjectNameEXT(gd.device, &name_info) != .SUCCESS {
-            log.error("Failed to set image's debug name")
-        }
-
+        assign_debug_name(gd.device, .IMAGE_VIEW, u64(image.image_view), strings.unsafe_string_to_cstring(view_name))
         strings.builder_reset(&sb)
+    } else {
+        log.warn("Creating image with no debug name!")
     }
 
     return Image_Handle(hm.insert(&gd.images, image))
@@ -2189,16 +2181,7 @@ create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> Semapho
     }
 
     if len(info.name) > 0 {
-        name_info := vk.DebugUtilsObjectNameInfoEXT {
-            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
-            pNext = nil,
-            objectType = .SEMAPHORE,
-            objectHandle = u64(s),
-            pObjectName = info.name
-        }
-        if vk.SetDebugUtilsObjectNameEXT(gd.device, &name_info) != .SUCCESS {
-            log.error("Failed to set semaphore's debug name")
-        }
+        assign_debug_name(gd.device, .SEMAPHORE, u64(s), info.name)
     } else {
         log.warn("Semaphore was created without a debug name")
     }
