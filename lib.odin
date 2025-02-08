@@ -1162,7 +1162,7 @@ sync_write_buffer :: proc(
 
     if out_buf.alloc_info.mapped_data != nil {
         in_p := &in_bytes[0]
-        out_p := out_buf.alloc_info.mapped_data
+        out_p := rawptr(uintptr(out_buf.alloc_info.mapped_data) + uintptr(base_offset_bytes))
         mem.copy(out_p, in_p, len(in_bytes))
     } else {
 
