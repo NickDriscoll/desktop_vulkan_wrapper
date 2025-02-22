@@ -2136,15 +2136,25 @@ cmd_bind_gfx_descriptor_set :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_
     vk.CmdBindDescriptorSets(cb, .GRAPHICS, gd.gfx_pipeline_layout, 0, 1, &gd.descriptor_set, 0, nil)
 }
 
-cmd_bind_pipeline :: proc(
+cmd_bind_gfx_pipeline :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
-    bind_point: vk.PipelineBindPoint,
     handle: Pipeline_Handle
 ) -> bool {
     cb := gd.gfx_command_buffers[cb_idx]
     pipeline := hm.get(&gd.pipelines, hm.Handle(handle)) or_return
-    vk.CmdBindPipeline(cb, bind_point, pipeline^)
+    vk.CmdBindPipeline(cb, .GRAPHICS, pipeline^)
+    return true
+}
+
+cmd_bind_compute_pipeline :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    handle: Pipeline_Handle
+) -> bool {
+    cb := gd.compute_command_buffers[cb_idx]
+    pipeline := hm.get(&gd.pipelines, hm.Handle(handle)) or_return
+    vk.CmdBindPipeline(cb, .COMPUTE, pipeline^)
     return true
 }
 
@@ -2835,8 +2845,8 @@ ComputePipelineInfo :: struct {
 
 create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineInfo) -> [dynamic]Pipeline_Handle {
     info_count := u32(len(infos))
-    pipeline_create_infos := make([dynamic]vk.ComputePipelineCreateInfo, info_count, allocator = context.temp_allocator)
-    pipelines := make([dynamic]vk.Pipeline, info_count, allocator = context.temp_allocator)
+    pipeline_create_infos := make([dynamic]vk.ComputePipelineCreateInfo, 0, info_count, allocator = context.temp_allocator)
+    pipelines := make([dynamic]vk.Pipeline, 1, info_count, allocator = context.temp_allocator)
     pipeline_handles := make([dynamic]Pipeline_Handle, info_count, allocator = context.temp_allocator)
 
     // Build list of create infos
