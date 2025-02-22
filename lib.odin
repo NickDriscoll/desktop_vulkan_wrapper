@@ -155,8 +155,9 @@ Graphics_Device :: struct {
     transfers_completed: u64,
 
 
-    // Pipeline layout used for all pipelines
-    pipeline_layout: vk.PipelineLayout,
+    // Pipeline layouts used for all pipelines
+    gfx_pipeline_layout: vk.PipelineLayout,
+    compute_pipeline_layout: vk.PipelineLayout,
     
     // Handle_Maps of all Vulkan objects
     buffers: hm.Handle_Map(Buffer),
@@ -828,7 +829,8 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     }
 
     // Create global pipeline layout
-    p_layout: vk.PipelineLayout
+    gfx_p_layout: vk.PipelineLayout
+    comp_p_layout: vk.PipelineLayout
     {
         pc_range := vk.PushConstantRange {
             stageFlags = {.VERTEX,.FRAGMENT},
@@ -844,7 +846,25 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             pushConstantRangeCount = 1,
             pPushConstantRanges = &pc_range
         }
-        if vk.CreatePipelineLayout(device, &layout_info, allocation_callbacks, &p_layout) != .SUCCESS {
+        if vk.CreatePipelineLayout(device, &layout_info, allocation_callbacks, &gfx_p_layout) != .SUCCESS {
+            log.error("Failed to create graphics pipeline layout.")
+        }
+
+        pc_range = vk.PushConstantRange {
+            stageFlags = {.COMPUTE},
+            offset = 0,
+            size = PUSH_CONSTANTS_SIZE
+        }
+        layout_info = vk.PipelineLayoutCreateInfo {
+            sType = .PIPELINE_LAYOUT_CREATE_INFO,
+            pNext = nil,
+            flags = nil,
+            setLayoutCount = 1,
+            pSetLayouts = &ds_layout,
+            pushConstantRangeCount = 1,
+            pPushConstantRanges = &pc_range
+        }
+        if vk.CreatePipelineLayout(device, &layout_info, allocation_callbacks, &comp_p_layout) != .SUCCESS {
             log.error("Failed to create graphics pipeline layout.")
         }
     }
@@ -873,7 +893,8 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         descriptor_set_layout = ds_layout,
         descriptor_pool = dp,
         descriptor_set = ds,
-        pipeline_layout = p_layout
+        gfx_pipeline_layout = gfx_p_layout,
+        compute_pipeline_layout = comp_p_layout,
     }
 
     // Init Handle_Maps
@@ -1940,12 +1961,37 @@ begin_gfx_command_buffer :: proc(
     return cb_idx
 }
 
+
+
+
+
+build_submit_infos :: proc(
+    gd: ^Graphics_Device,
+    submit_infos: ^[dynamic]vk.SemaphoreSubmitInfoKHR,
+    semaphore_ops: ^[dynamic]Semaphore_Op
+) -> bool {
+    count := len(semaphore_ops)
+    resize(submit_infos, count)
+    for i := 0; i < count; i += 1 {
+        sem := hm.get(&gd.semaphores, hm.Handle(semaphore_ops[i].semaphore)) or_return
+        submit_infos[i] = vk.SemaphoreSubmitInfo{
+            sType = .SEMAPHORE_SUBMIT_INFO_KHR,
+            pNext = nil,
+            semaphore = sem^,
+            value = semaphore_ops[i].value,
+            stageMask = {.ALL_COMMANDS},    // @TODO: Is this heavy-handed or appropriate?
+            deviceIndex = 0
+        }
+    }
+    return true
+}
+
 submit_compute_command_buffer :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
     sync: ^Sync_Info
 ) {
-    assert(false)
+    assert(false, "Don't call this proc")
     cb := gd.compute_command_buffers[cb_idx]
     if vk.EndCommandBuffer(cb) != .SUCCESS {
         log.error("Unable to end compute command buffer")
@@ -1975,27 +2021,6 @@ submit_gfx_command_buffer :: proc(
         pNext = nil,
         commandBuffer = cb,
         deviceMask = 0
-    }
-
-    build_submit_infos :: proc(
-        gd: ^Graphics_Device,
-        submit_infos: ^[dynamic]vk.SemaphoreSubmitInfoKHR,
-        semaphore_ops: ^[dynamic]Semaphore_Op
-    ) -> bool {
-        count := len(semaphore_ops)
-        resize(submit_infos, count)
-        for i := 0; i < count; i += 1 {
-            sem := hm.get(&gd.semaphores, hm.Handle(semaphore_ops[i].semaphore)) or_return
-            submit_infos[i] = vk.SemaphoreSubmitInfo{
-                sType = .SEMAPHORE_SUBMIT_INFO_KHR,
-                pNext = nil,
-                semaphore = sem^,
-                value = semaphore_ops[i].value,
-                stageMask = {.ALL_COMMANDS},    // @TODO: Is this heavy-handed or appropriate?
-                deviceIndex = 0
-            }
-        }
-        return true
     }
 
     // Make semaphore submit infos
@@ -2106,9 +2131,9 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
     vk.CmdBeginRenderingKHR(cb, &info)
 }
 
-cmd_bind_descriptor_set :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+cmd_bind_gfx_descriptor_set :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
     cb := gd.gfx_command_buffers[cb_idx]
-    vk.CmdBindDescriptorSets(cb, .GRAPHICS, gd.pipeline_layout, 0, 1, &gd.descriptor_set, 0, nil)
+    vk.CmdBindDescriptorSets(cb, .GRAPHICS, gd.gfx_pipeline_layout, 0, 1, &gd.descriptor_set, 0, nil)
 }
 
 cmd_bind_pipeline :: proc(
@@ -2155,9 +2180,7 @@ cmd_dispatch :: proc(
     group_county: u32,
     group_countz: u32,
 ) {
-    cb := gd.gfx_command_buffers[cb_idx]
-
-    
+    cb := gd.compute_command_buffers[cb_idx]
     vk.CmdDispatch(cb, group_countx, group_county, group_countz)
 }
 
@@ -2186,7 +2209,13 @@ cmd_set_scissor :: proc(
 cmd_push_constants_gfx :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, in_struct: ^$Struct_Type) {
     cb := gd.gfx_command_buffers[cb_idx]
     byte_count : u32 = u32(size_of(Struct_Type))
-    vk.CmdPushConstants(cb, gd.pipeline_layout, {.VERTEX,.FRAGMENT}, 0, byte_count, in_struct)
+    vk.CmdPushConstants(cb, gd.gfx_pipeline_layout, {.VERTEX,.FRAGMENT}, 0, byte_count, in_struct)
+}
+
+cmd_push_constants_compute :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, in_struct: ^$Struct_Type) {
+    cb := gd.compute_command_buffers[cb_idx]
+    byte_count : u32 = u32(size_of(Struct_Type))
+    vk.CmdPushConstants(cb, gd.compute_pipeline_layout, {.COMPUTE}, 0, byte_count, in_struct)
 }
 
 cmd_bind_index_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, buffer: Buffer_Handle) -> bool {
@@ -2528,7 +2557,7 @@ create_shader_module :: proc(gd: ^Graphics_Device, code: []u32) -> vk.ShaderModu
 }
 
 Pipeline_Handle :: distinct hm.Handle
-Graphics_Pipeline_Info :: struct {
+GraphicsPipelineInfo :: struct {
     vertex_shader_bytecode: []u32,
     fragment_shader_bytecode: []u32,
     input_assembly_state: Input_Assembly_State,
@@ -2540,7 +2569,8 @@ Graphics_Pipeline_Info :: struct {
     renderpass_state: PipelineRenderpass_Info
 }
 
-create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeline_Info) -> [dynamic]Pipeline_Handle {
+// @TODO: temp allocator
+create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelineInfo) -> [dynamic]Pipeline_Handle {
     pipeline_count := len(infos)
 
     // Output dynamic array of pipeline handles
@@ -2771,7 +2801,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
             pDepthStencilState = &depthstencil_states[i],
             pColorBlendState = &colorblend_states[i],
             pDynamicState = &dynamic_state_info,
-            layout = gd.pipeline_layout,
+            layout = gd.gfx_pipeline_layout,
             renderPass = 0,
             subpass = 0,
             basePipelineHandle = 0,
@@ -2797,4 +2827,47 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []Graphics_Pipeli
     }
 
     return handles
+}
+
+ComputePipelineInfo :: struct {
+    compute_shader_bytecode: []u32,
+}
+
+create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineInfo) -> [dynamic]Pipeline_Handle {
+    info_count := u32(len(infos))
+    pipeline_create_infos := make([dynamic]vk.ComputePipelineCreateInfo, info_count, allocator = context.temp_allocator)
+    pipelines := make([dynamic]vk.Pipeline, info_count, allocator = context.temp_allocator)
+    pipeline_handles := make([dynamic]Pipeline_Handle, info_count, allocator = context.temp_allocator)
+
+    // Build list of create infos
+    for info in infos {
+        module := create_shader_module(gd, info.compute_shader_bytecode)
+        stage := vk.PipelineShaderStageCreateInfo {
+            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+            pNext = nil,
+            flags = nil,
+            stage = {.COMPUTE},
+            module = module,
+            pName = "main",
+            pSpecializationInfo = nil
+        }
+        create_info := vk.ComputePipelineCreateInfo {
+            sType = .COMPUTE_PIPELINE_CREATE_INFO,
+            pNext = nil,
+            flags = nil,
+            stage = stage,
+            layout = gd.compute_pipeline_layout,
+            basePipelineHandle = 0,
+            basePipelineIndex = 0,
+        }
+        append(&pipeline_create_infos, create_info)
+    }
+    vk.CreateComputePipelines(gd.device, gd.pipeline_cache, info_count, &pipeline_create_infos[0], gd.alloc_callbacks, &pipelines[0])
+
+    // Insert pipelines into handlemap
+    for pipeline, i in pipelines {
+        pipeline_handles[i] = Pipeline_Handle(hm.insert(&gd.pipelines, pipeline))
+    }
+
+    return pipeline_handles
 }
