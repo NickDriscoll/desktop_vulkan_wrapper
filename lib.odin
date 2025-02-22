@@ -129,6 +129,7 @@ Graphics_Device :: struct {
     compute_command_buffers: [dynamic]vk.CommandBuffer,
     transfer_command_buffers: [dynamic]vk.CommandBuffer,
     next_gfx_command_buffer: u32,
+    next_compute_command_buffer: u32,
 
     // All users of this Vulkan wrapper will access
     // buffers via their device addresses and
@@ -1781,6 +1782,26 @@ present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> bool {
 
 CommandBuffer_Index :: distinct u32
 
+begin_compute_command_buffer :: proc(
+    gd: ^Graphics_Device,
+) -> CommandBuffer_Index {
+    cb_idx := CommandBuffer_Index(gd.next_compute_command_buffer)
+    gd.next_compute_command_buffer = (gd.next_compute_command_buffer + 1) % gd.frames_in_flight
+
+    cb := gd.compute_command_buffers[cb_idx]
+    info := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        pNext = nil,
+        flags = {.ONE_TIME_SUBMIT},
+        pInheritanceInfo = nil
+    }
+    if vk.BeginCommandBuffer(cb, &info) != .SUCCESS {
+        log.error("Unable to begin compute command buffer.")
+    }
+
+    return cb_idx
+}
+
 begin_gfx_command_buffer :: proc(
     gd: ^Graphics_Device,
     sync_info: ^Sync_Info,
@@ -1912,7 +1933,30 @@ begin_gfx_command_buffer :: proc(
     return cb_idx
 }
 
-submit_gfx_command_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, sync: ^Sync_Info) {
+submit_compute_command_buffer :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index
+) {
+    assert(false)
+    cb := gd.compute_command_buffers[cb_idx]
+    if vk.EndCommandBuffer(cb) != .SUCCESS {
+        log.error("Unable to end compute command buffer")
+    }
+
+    cb_info := vk.CommandBufferSubmitInfo{
+        sType = .COMMAND_BUFFER_SUBMIT_INFO_KHR,
+        pNext = nil,
+        commandBuffer = cb,
+        deviceMask = 0
+    }
+
+}
+
+submit_gfx_command_buffer :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    sync: ^Sync_Info
+) {
     cb := gd.gfx_command_buffers[cb_idx]
     if vk.EndCommandBuffer(cb) != .SUCCESS {
         log.error("Unable to end gfx command buffer")
@@ -2094,6 +2138,19 @@ cmd_draw_indexed :: proc(
 ) {
     cb := gd.gfx_command_buffers[cb_idx]
     vk.CmdDrawIndexed(cb, index_count, instance_count, first_index, vertex_offset, first_instance)
+}
+
+cmd_dispatch :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    group_countx: u32,
+    group_county: u32,
+    group_countz: u32,
+) {
+    cb := gd.gfx_command_buffers[cb_idx]
+
+    
+    vk.CmdDispatch(cb, group_countx, group_county, group_countz)
 }
 
 Viewport :: vk.Viewport
