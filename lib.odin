@@ -2118,7 +2118,7 @@ cmd_set_scissor :: proc(
     vk.CmdSetScissor(cb, first_scissor, u32(len(scissors)), raw_data(scissors))
 }
 
-cmd_push_constants_gfx :: proc($Struct_Type: typeid, gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, in_struct: ^Struct_Type) {
+cmd_push_constants_gfx :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, in_struct: ^$Struct_Type) {
     cb := gd.gfx_command_buffers[cb_idx]
     byte_count : u32 = u32(size_of(Struct_Type))
     vk.CmdPushConstants(cb, gd.pipeline_layout, {.VERTEX,.FRAGMENT}, 0, byte_count, in_struct)
