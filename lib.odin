@@ -1812,7 +1812,31 @@ CommandBuffer_Index :: distinct u32
 
 begin_compute_command_buffer :: proc(
     gd: ^Graphics_Device,
+    timeline_semaphore: Semaphore_Handle
 ) -> CommandBuffer_Index {
+    // Sync point where we wait if there are already N frames in the gfx queue
+    if gd.frame_count >= u64(gd.frames_in_flight) {
+        // Wait on timeline semaphore before starting command buffer execution
+        wait_value := gd.frame_count - u64(gd.frames_in_flight) + 1
+        
+        // CPU-sync to prevent CPU from getting further ahead than
+        // the number of frames in flight
+        sem, ok := get_semaphore(gd, timeline_semaphore)
+        if !ok do log.error("Couldn't find semaphore for CPU-sync")
+        info := vk.SemaphoreWaitInfo {
+            sType = .SEMAPHORE_WAIT_INFO,
+            pNext = nil,
+            flags = nil,
+            semaphoreCount = 1,
+            pSemaphores = sem,
+            pValues = &wait_value
+        }
+        res := vk.WaitSemaphores(gd.device, &info, max(u64))
+        if res != .SUCCESS {
+            log.errorf("CPU failed to wait for timeline semaphore: %v", res)
+        }
+    }
+
     cb_idx := CommandBuffer_Index(gd.next_compute_command_buffer)
     gd.next_compute_command_buffer = (gd.next_compute_command_buffer + 1) % gd.frames_in_flight
 
@@ -1832,8 +1856,7 @@ begin_compute_command_buffer :: proc(
 
 begin_gfx_command_buffer :: proc(
     gd: ^Graphics_Device,
-    sync_info: ^Sync_Info,
-    gfx_timeline_semaphore: Semaphore_Handle
+    timeline_semaphore: Semaphore_Handle
 ) -> CommandBuffer_Index {
     
     
@@ -1841,14 +1864,10 @@ begin_gfx_command_buffer :: proc(
     if gd.frame_count >= u64(gd.frames_in_flight) {
         // Wait on timeline semaphore before starting command buffer execution
         wait_value := gd.frame_count - u64(gd.frames_in_flight) + 1
-        // append(&sync_info.wait_ops, Semaphore_Op {
-        //     semaphore = gfx_timeline_semaphore,
-        //     value = wait_value
-        // })
         
         // CPU-sync to prevent CPU from getting further ahead than
         // the number of frames in flight
-        sem, ok := get_semaphore(gd, gfx_timeline_semaphore)
+        sem, ok := get_semaphore(gd, timeline_semaphore)
         if !ok do log.error("Couldn't find semaphore for CPU-sync")
         info := vk.SemaphoreWaitInfo {
             sType = .SEMAPHORE_WAIT_INFO,
@@ -1971,7 +1990,6 @@ build_submit_infos :: proc(
     semaphore_ops: ^[dynamic]Semaphore_Op
 ) -> bool {
     count := len(semaphore_ops)
-    resize(submit_infos, count)
     for i := 0; i < count; i += 1 {
         sem := hm.get(&gd.semaphores, hm.Handle(semaphore_ops[i].semaphore)) or_return
         submit_infos[i] = vk.SemaphoreSubmitInfo{
@@ -1991,7 +2009,6 @@ submit_compute_command_buffer :: proc(
     cb_idx: CommandBuffer_Index,
     sync: ^Sync_Info
 ) {
-    assert(false, "Don't call this proc")
     cb := gd.compute_command_buffers[cb_idx]
     if vk.EndCommandBuffer(cb) != .SUCCESS {
         log.error("Unable to end compute command buffer")
@@ -2004,6 +2021,26 @@ submit_compute_command_buffer :: proc(
         deviceMask = 0
     }
 
+    wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.wait_ops), allocator = context.temp_allocator)
+    signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.signal_ops), allocator = context.temp_allocator)
+    build_submit_infos(gd, &wait_infos, &sync.wait_ops)
+    build_submit_infos(gd, &signal_infos, &sync.signal_ops)
+
+    info := vk.SubmitInfo2 {
+        sType = .SUBMIT_INFO_2,
+        pNext = nil,
+        flags = nil,
+        waitSemaphoreInfoCount = u32(len(wait_infos)),
+        pWaitSemaphoreInfos = raw_data(wait_infos),
+        signalSemaphoreInfoCount = u32(len(signal_infos)),
+        pSignalSemaphoreInfos = raw_data(signal_infos),
+        commandBufferInfoCount = 1,
+        pCommandBufferInfos = &cb_info
+    }
+    if vk.QueueSubmit2KHR(gd.compute_queue, 1, &info, 0) != .SUCCESS {
+        log.error("Unable to submit compute command buffer")
+    }
+    clear_sync_info(sync)
 }
 
 submit_gfx_command_buffer :: proc(
@@ -2024,31 +2061,27 @@ submit_gfx_command_buffer :: proc(
     }
 
     // Make semaphore submit infos
-    wait_submit_infos: [dynamic]vk.SemaphoreSubmitInfoKHR
-    defer delete(wait_submit_infos)
-    resize(&wait_submit_infos, len(sync.wait_ops))
+    wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.wait_ops), allocator = context.temp_allocator)
+    signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.signal_ops), allocator = context.temp_allocator)
     
-    signal_submit_infos: [dynamic]vk.SemaphoreSubmitInfoKHR
-    defer delete(signal_submit_infos)
-    resize(&signal_submit_infos, len(sync.signal_ops))
-    
-    build_submit_infos(gd, &wait_submit_infos, &sync.wait_ops)
-    build_submit_infos(gd, &signal_submit_infos, &sync.signal_ops)
+    build_submit_infos(gd, &wait_infos, &sync.wait_ops)
+    build_submit_infos(gd, &signal_infos, &sync.signal_ops)
 
     info := vk.SubmitInfo2{
         sType = .SUBMIT_INFO_2_KHR,
         pNext = nil,
         flags = nil,
-        waitSemaphoreInfoCount = u32(len(wait_submit_infos)),
-        pWaitSemaphoreInfos = raw_data(wait_submit_infos),
-        signalSemaphoreInfoCount = u32(len(signal_submit_infos)),
-        pSignalSemaphoreInfos = raw_data(signal_submit_infos),
+        waitSemaphoreInfoCount = u32(len(wait_infos)),
+        pWaitSemaphoreInfos = raw_data(wait_infos),
+        signalSemaphoreInfoCount = u32(len(signal_infos)),
+        pSignalSemaphoreInfos = raw_data(signal_infos),
         commandBufferInfoCount = 1,
         pCommandBufferInfos = &cb_info
     }
     if vk.QueueSubmit2KHR(gd.gfx_queue, 1, &info, 0) != .SUCCESS {
         log.error("Unable to submit gfx command buffer")
     }
+    clear_sync_info(sync)
 }
 
 
