@@ -2348,6 +2348,20 @@ destroy_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> boo
     return true
 }
 
+// Defines a memory dependency
+// on one buffer range
+Buffer_Barrier :: struct {
+    src_stage_mask: vk.PipelineStageFlags2,
+    src_access_mask: vk.AccessFlags2,
+    dst_stage_mask: vk.PipelineStageFlags2,
+    dst_access_mask: vk.AccessFlags2,
+    src_queue_family: u32,
+    dst_queue_family: u32,
+    buffer: vk.Buffer,
+    offset: vk.DeviceSize,
+    size: vk.DeviceSize,
+}
+
 // Defines a memory dependency on exactly
 // one subresource range of a vk.Image (VkImage)
 Image_Barrier :: struct {
@@ -2407,6 +2421,70 @@ cmd_gfx_pipeline_barriers :: proc(
         pBufferMemoryBarriers = nil,
         imageMemoryBarrierCount = u32(len(im_barriers)),
         pImageMemoryBarriers = raw_data(im_barriers)
+    }
+    vk.CmdPipelineBarrier2KHR(cb, &info)
+}
+
+// Inserts an arbitrary number of memory barriers
+// into the compute command buffer at this point
+cmd_compute_pipeline_barriers :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    buffer_barriers: []Buffer_Barrier,
+    image_barriers: []Image_Barrier
+) {
+    cb := gd.compute_command_buffers[cb_idx]
+
+    buf_barriers := make([dynamic]vk.BufferMemoryBarrier2, 0, len(buffer_barriers), allocator = context.temp_allocator)
+    for barrier in buffer_barriers {
+        append(&buf_barriers, vk.BufferMemoryBarrier2 {
+            sType = .BUFFER_MEMORY_BARRIER_2,
+            pNext = nil,
+            srcStageMask = barrier.src_stage_mask,
+            srcAccessMask = barrier.src_access_mask,
+            dstStageMask = barrier.dst_stage_mask,
+            dstAccessMask = barrier.dst_access_mask,
+            srcQueueFamilyIndex = barrier.src_queue_family,
+            dstQueueFamilyIndex = barrier.dst_queue_family,
+            buffer = barrier.buffer,
+            offset = barrier.offset,
+            size = barrier.size,
+        })
+    }
+    
+    im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(buffer_barriers), allocator = context.temp_allocator)
+    for barrier in image_barriers {
+        using barrier
+
+        append(
+            &im_barriers,
+            vk.ImageMemoryBarrier2 {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                pNext = nil,
+                srcStageMask = src_stage_mask,
+                srcAccessMask = src_access_mask,
+                dstStageMask = dst_stage_mask,
+                dstAccessMask = dst_access_mask,
+                oldLayout = old_layout,
+                newLayout = new_layout,
+                srcQueueFamilyIndex = src_queue_family,
+                dstQueueFamilyIndex = dst_queue_family,
+                image = image,
+                subresourceRange = subresource_range
+            }
+        )
+    }
+
+    info := vk.DependencyInfo {
+        sType = .DEPENDENCY_INFO,
+        pNext = nil,
+        dependencyFlags = nil,
+        memoryBarrierCount = 0,
+        pMemoryBarriers = nil,
+        bufferMemoryBarrierCount = u32(len(buf_barriers)),
+        pBufferMemoryBarriers = &buf_barriers[0],
+        imageMemoryBarrierCount = u32(len(im_barriers)),
+        pImageMemoryBarriers = &im_barriers[0]
     }
     vk.CmdPipelineBarrier2KHR(cb, &info)
 }
