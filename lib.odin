@@ -2040,7 +2040,6 @@ submit_compute_command_buffer :: proc(
     if vk.QueueSubmit2KHR(gd.compute_queue, 1, &info, 0) != .SUCCESS {
         log.error("Unable to submit compute command buffer")
     }
-    clear_sync_info(sync)
 }
 
 submit_gfx_command_buffer :: proc(
@@ -2081,7 +2080,6 @@ submit_gfx_command_buffer :: proc(
     if vk.QueueSubmit2KHR(gd.gfx_queue, 1, &info, 0) != .SUCCESS {
         log.error("Unable to submit gfx command buffer")
     }
-    clear_sync_info(sync)
 }
 
 
@@ -2482,9 +2480,9 @@ cmd_compute_pipeline_barriers :: proc(
         memoryBarrierCount = 0,
         pMemoryBarriers = nil,
         bufferMemoryBarrierCount = u32(len(buf_barriers)),
-        pBufferMemoryBarriers = &buf_barriers[0],
+        pBufferMemoryBarriers = raw_data(buf_barriers),
         imageMemoryBarrierCount = u32(len(im_barriers)),
-        pImageMemoryBarriers = &im_barriers[0]
+        pImageMemoryBarriers = raw_data(im_barriers)
     }
     vk.CmdPipelineBarrier2KHR(cb, &info)
 }
