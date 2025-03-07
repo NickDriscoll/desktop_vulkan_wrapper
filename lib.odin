@@ -1771,15 +1771,54 @@ delete_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> bool {
     return true
 }
 
-acquire_swapchain_image :: proc(gd: ^Graphics_Device, out_image_idx: ^u32) -> bool {
+acquire_swapchain_image :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    sync: ^Sync_Info,
+) -> (image_idx: u32, ok: bool) {
     idx := in_flight_idx(gd)
     sem := get_semaphore(gd, gd.acquire_semaphores[idx]) or_return
     
-    if vk.AcquireNextImageKHR(gd.device, gd.swapchain, max(u64), sem^, 0, out_image_idx) != .SUCCESS {
+    out_image_idx: u32
+    if vk.AcquireNextImageKHR(gd.device, gd.swapchain, max(u64), sem^, 0, &out_image_idx) != .SUCCESS {
         log.error("Failed to acquire swapchain image")
-        return false
+        return 0, false
     }
-    return true
+
+    // Define execution and memory dependencies surrounding swapchain image acquire
+    
+    // Wait on swapchain image acquire semaphore
+    // and signal when we're done drawing on a different semaphore
+    add_wait_op(gd, sync, gd.acquire_semaphores[in_flight_idx(gd)])
+    add_signal_op(gd, sync, gd.present_semaphores[in_flight_idx(gd)])
+    
+    swapchain_image_handle := gd.swapchain_images[out_image_idx]
+
+    // Memory barrier between swapchain acquire and rendering
+    swapchain_vkimage, _ := get_image_vkhandle(gd, swapchain_image_handle)
+    cmd_gfx_pipeline_barriers(gd, cb_idx, {
+        Image_Barrier {
+            src_stage_mask = {.ALL_COMMANDS},
+            src_access_mask = {.MEMORY_READ},
+            dst_stage_mask = {.COLOR_ATTACHMENT_OUTPUT},
+            dst_access_mask = {.MEMORY_WRITE},
+            old_layout = .UNDEFINED,
+            new_layout = .COLOR_ATTACHMENT_OPTIMAL,
+            src_queue_family = gd.gfx_queue_family,
+            dst_queue_family = gd.gfx_queue_family,
+            image = swapchain_vkimage,
+            subresource_range = vk.ImageSubresourceRange {
+                aspectMask = {.COLOR},
+                baseMipLevel = 0,
+                levelCount = 1,
+                baseArrayLayer = 0,
+                layerCount = 1
+            }
+        }
+    })
+
+
+    return out_image_idx, true
 }
 
 present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> bool {
@@ -2082,7 +2121,38 @@ submit_gfx_command_buffer :: proc(
     }
 }
 
+submit_gfx_and_present :: proc(
+    gd: ^Graphics_Device,
+    cb_idx: CommandBuffer_Index,
+    sync: ^Sync_Info,
+    swapchain_idx: ^u32
+) {
+    // Memory barrier between rendering to swapchain image and swapchain present
+    swapchain_image, _ := get_image_vkhandle(gd, gd.swapchain_images[swapchain_idx^])
+    cmd_gfx_pipeline_barriers(gd, cb_idx, {
+        Image_Barrier {
+            src_stage_mask = {.COLOR_ATTACHMENT_OUTPUT},
+            src_access_mask = {.MEMORY_WRITE},
+            dst_stage_mask = {.ALL_COMMANDS},
+            dst_access_mask = {.MEMORY_READ},
+            old_layout = .COLOR_ATTACHMENT_OPTIMAL,
+            new_layout = .PRESENT_SRC_KHR,
+            src_queue_family = gd.gfx_queue_family,
+            dst_queue_family = gd.gfx_queue_family,
+            image = swapchain_image,
+            subresource_range = vk.ImageSubresourceRange {
+                aspectMask = {.COLOR},
+                baseMipLevel = 0,
+                levelCount = 1,
+                baseArrayLayer = 0,
+                layerCount = 1
+            }
+        }
+    })
 
+    submit_gfx_command_buffer(gd, cb_idx, sync)
+    present_swapchain_image(gd, swapchain_idx)
+}
 
 
 
