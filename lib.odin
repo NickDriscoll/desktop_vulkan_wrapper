@@ -910,6 +910,13 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         hm.init(&gd.pipelines)
     }
 
+    // Init queues
+    {
+        queue.init(&gd.pending_images)
+        queue.init(&gd.buffer_deletes)
+        queue.init(&gd.image_deletes)
+    }
+
     // Create staging buffer
     {
         info := Buffer_Info {
