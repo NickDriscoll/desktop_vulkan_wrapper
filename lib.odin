@@ -59,6 +59,11 @@ Sync_Info :: struct {
     signal_ops: [dynamic]Semaphore_Op,
 }
 
+sync_init :: proc(s: ^Sync_Info) {
+    s.wait_ops = make([dynamic]Semaphore_Op)
+    s.signal_ops = make([dynamic]Semaphore_Op)
+}
+
 add_wait_op_binary :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle) {
     add_wait_op_timeline(gd, i, handle, 0)
 }
