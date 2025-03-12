@@ -2466,9 +2466,7 @@ cmd_gfx_pipeline_barriers :: proc(
 ) {
     cb := gd.gfx_command_buffers[cb_idx]
 
-    im_barriers: [dynamic]vk.ImageMemoryBarrier2
-    defer delete(im_barriers)
-    reserve(&im_barriers, len(image_barriers))
+    im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(image_barriers), context.temp_allocator)
     for barrier in image_barriers {
         using barrier
 
@@ -2578,9 +2576,7 @@ cmd_transfer_pipeline_barriers :: proc(
 ) {
     cb := gd.transfer_command_buffers[cb_idx]
 
-    im_barriers: [dynamic]vk.ImageMemoryBarrier2
-    defer delete(im_barriers)
-    reserve(&im_barriers, len(image_barriers))
+    im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(image_barriers), context.temp_allocator)
     for barrier in image_barriers {
         using barrier
 
@@ -2775,47 +2771,23 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
     pipeline_count := len(infos)
 
     // Output dynamic array of pipeline handles
-    handles: [dynamic]Pipeline_Handle
-    resize(&handles, pipeline_count)
-
+    handles := make([dynamic]Pipeline_Handle, pipeline_count, context.temp_allocator)
 
 
     // One dynamic array for each thing in Graphics_Pipeline_Info
-    create_infos: [dynamic]vk.GraphicsPipelineCreateInfo
-    defer delete(create_infos)
-    resize(&create_infos, pipeline_count)
-
-    pipelines: [dynamic]vk.Pipeline
-    defer delete(pipelines)
-    resize(&pipelines, pipeline_count)
-
-    shader_modules: [dynamic]vk.ShaderModule
-    defer delete(shader_modules)
-    resize(&shader_modules, 2 * pipeline_count)
-
+    pipelines := make([dynamic]vk.Pipeline, pipeline_count, context.temp_allocator)
+    create_infos := make([dynamic]vk.GraphicsPipelineCreateInfo, pipeline_count, context.temp_allocator)
+    
+    shader_modules := make([dynamic]vk.ShaderModule, 2 * pipeline_count, context.temp_allocator)
     defer for module in shader_modules {
         vk.DestroyShaderModule(gd.device, module, gd.alloc_callbacks)
     }    
 
-    shader_infos: [dynamic]vk.PipelineShaderStageCreateInfo
-    defer delete(shader_infos)
-    resize(&shader_infos, 2 * pipeline_count)
-    
-    input_assembly_states: [dynamic]vk.PipelineInputAssemblyStateCreateInfo
-    resize(&input_assembly_states, pipeline_count)
-    defer delete(input_assembly_states)
-    
-    tessellation_states: [dynamic]vk.PipelineTessellationStateCreateInfo
-    defer delete(tessellation_states)
-    resize(&tessellation_states, pipeline_count)
-    
-    rasterization_states: [dynamic]vk.PipelineRasterizationStateCreateInfo
-    defer delete(rasterization_states)
-    resize(&rasterization_states, pipeline_count)
-    
-    multisample_states: [dynamic]vk.PipelineMultisampleStateCreateInfo
-    defer delete(multisample_states)
-    resize(&multisample_states, pipeline_count)
+    shader_infos := make([dynamic]vk.PipelineShaderStageCreateInfo, 2 * pipeline_count, context.temp_allocator)
+    input_assembly_states := make([dynamic]vk.PipelineInputAssemblyStateCreateInfo, pipeline_count, context.temp_allocator)
+    tessellation_states := make([dynamic]vk.PipelineTessellationStateCreateInfo, pipeline_count, context.temp_allocator)
+    rasterization_states := make([dynamic]vk.PipelineRasterizationStateCreateInfo, pipeline_count, context.temp_allocator)
+    multisample_states := make([dynamic]vk.PipelineMultisampleStateCreateInfo, pipeline_count, context.temp_allocator)
     
     sample_masks: [dynamic]^vk.SampleMask
     defer delete(sample_masks)
