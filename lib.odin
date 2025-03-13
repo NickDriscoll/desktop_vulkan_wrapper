@@ -1965,10 +1965,8 @@ begin_gfx_command_buffer :: proc(
             vma.destroy_image(gd.allocator, image.image, image.allocation)
         }
 
-        d_image_infos: [dynamic]vk.DescriptorImageInfo
-        defer delete(d_image_infos)
-        d_writes: [dynamic]vk.WriteDescriptorSet
-        defer delete(d_writes)
+        d_image_infos := make([dynamic]vk.DescriptorImageInfo, context.temp_allocator)
+        d_writes := make([dynamic]vk.WriteDescriptorSet, context.temp_allocator)
 
         // Record queue family ownership transfer for in-flight images
         {
@@ -2788,26 +2786,11 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
     tessellation_states := make([dynamic]vk.PipelineTessellationStateCreateInfo, pipeline_count, context.temp_allocator)
     rasterization_states := make([dynamic]vk.PipelineRasterizationStateCreateInfo, pipeline_count, context.temp_allocator)
     multisample_states := make([dynamic]vk.PipelineMultisampleStateCreateInfo, pipeline_count, context.temp_allocator)
-    
-    sample_masks: [dynamic]^vk.SampleMask
-    defer delete(sample_masks)
-    resize(&sample_masks, pipeline_count)
-    
-    depthstencil_states: [dynamic]vk.PipelineDepthStencilStateCreateInfo
-    defer delete(depthstencil_states)
-    resize(&depthstencil_states, pipeline_count)
-
-    colorblend_attachments: [dynamic]vk.PipelineColorBlendAttachmentState
-    defer delete(colorblend_attachments)
-    resize(&colorblend_attachments, pipeline_count)
-    
-    colorblend_states: [dynamic]vk.PipelineColorBlendStateCreateInfo
-    defer delete(colorblend_states)
-    resize(&colorblend_states, pipeline_count)
-    
-    renderpass_states: [dynamic]vk.PipelineRenderingCreateInfo
-    defer delete(renderpass_states)
-    resize(&renderpass_states, pipeline_count)
+    sample_masks := make([dynamic]^vk.SampleMask, pipeline_count, context.temp_allocator)
+    depthstencil_states := make([dynamic]vk.PipelineDepthStencilStateCreateInfo, pipeline_count, context.temp_allocator)
+    colorblend_attachments := make([dynamic]vk.PipelineColorBlendAttachmentState, pipeline_count, context.temp_allocator)
+    colorblend_states := make([dynamic]vk.PipelineColorBlendStateCreateInfo, pipeline_count, context.temp_allocator)
+    renderpass_states := make([dynamic]vk.PipelineRenderingCreateInfo, pipeline_count, context.temp_allocator)
     
     dynamic_states : [2]vk.DynamicState = {.VIEWPORT,.SCISSOR}
     
@@ -2986,9 +2969,9 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
         gd.device,
         gd.pipeline_cache,
         u32(pipeline_count),
-        raw_data(create_infos),
+        &create_infos[0],
         gd.alloc_callbacks,
-        raw_data(pipelines)
+        &pipelines[0]
     )
     if res != .SUCCESS {
         log.error("Failed to compile graphics pipelines")
