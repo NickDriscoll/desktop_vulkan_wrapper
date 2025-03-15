@@ -956,6 +956,8 @@ quit_vulkan :: proc(gd: ^Graphics_Device) {
     hm.destroy(&gd.images)
     hm.destroy(&gd.semaphores)
     hm.destroy(&gd.pipelines)
+
+    vma.destroy_allocator(gd.allocator)
 }
 
 assign_debug_name :: proc(device: vk.Device, object_type: vk.ObjectType, object_handle: u64, name: cstring) {
