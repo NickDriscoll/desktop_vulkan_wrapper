@@ -110,6 +110,7 @@ Graphics_Device :: struct {
     pipeline_cache: vk.PipelineCache,       // @TODO: Actually use pipeline cache
     alloc_callbacks: ^vk.AllocationCallbacks,
     allocator: vma.Allocator,
+
     frames_in_flight: u32,
     frame_count: u64,
 
@@ -221,7 +222,7 @@ Init_Parameters :: struct {
 init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     assert(frames_in_flight > 0)
     
-    log.log(.Info, "Initializing Vulkan instance and device")
+    log.info("Initializing Vulkan instance and device")
     
     if vk_get_instance_proc_addr == nil {
         log.error("Init_Paramenters.vk_get_instance_proc_addr was nil!")
@@ -943,6 +944,25 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
 }
 
 quit_vulkan :: proc(gd: ^Graphics_Device) {
+    vk.DestroySwapchainKHR(gd.device, gd.swapchain, gd.alloc_callbacks)
+    vk.DestroySurfaceKHR(gd.instance, gd.surface, gd.alloc_callbacks)
+
+    for buffer in gd.buffers.values {
+        vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
+    }
+
+    for image in gd.images.values {
+        //vma.destroy_image(gd.allocator, image.image, image.allocation)
+    }
+
+    for semaphore in gd.semaphores.values {
+        vk.DestroySemaphore(gd.device, semaphore, gd.alloc_callbacks)
+    }
+
+    for pipeline in gd.pipelines.values {
+        vk.DestroyPipeline(gd.device, pipeline, gd.alloc_callbacks)
+    }
+
     delete(gd.acquire_semaphores)
     delete(gd.present_semaphores)
     delete(gd.swapchain_images)
@@ -958,6 +978,19 @@ quit_vulkan :: proc(gd: ^Graphics_Device) {
     hm.destroy(&gd.pipelines)
 
     vma.destroy_allocator(gd.allocator)
+
+    for sampler in gd.immutable_samplers {
+        vk.DestroySampler(gd.device, sampler, gd.alloc_callbacks)
+    }
+
+    vk.DestroyPipelineLayout(gd.device, gd.gfx_pipeline_layout, gd.alloc_callbacks)
+    vk.DestroyPipelineLayout(gd.device, gd.compute_pipeline_layout, gd.alloc_callbacks)
+    vk.DestroyDescriptorPool(gd.device, gd.descriptor_pool, gd.alloc_callbacks)
+    vk.DestroyCommandPool(gd.device, gd.gfx_command_pool, gd.alloc_callbacks)
+    vk.DestroyCommandPool(gd.device, gd.compute_command_pool, gd.alloc_callbacks)
+    vk.DestroyCommandPool(gd.device, gd.transfer_command_pool, gd.alloc_callbacks)
+    vk.DestroyDevice(gd.device, gd.alloc_callbacks)
+    vk.DestroyInstance(gd.instance, gd.alloc_callbacks)
 }
 
 assign_debug_name :: proc(device: vk.Device, object_type: vk.ObjectType, object_handle: u64, name: cstring) {
