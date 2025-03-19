@@ -993,6 +993,10 @@ quit_vulkan :: proc(gd: ^Graphics_Device) {
     vk.DestroyInstance(gd.instance, gd.alloc_callbacks)
 }
 
+device_wait_idle :: proc(gd: ^Graphics_Device) -> vk.Result {
+    return vk.DeviceWaitIdle(gd.device)
+}
+
 assign_debug_name :: proc(device: vk.Device, object_type: vk.ObjectType, object_handle: u64, name: cstring) {
     name_info := vk.DebugUtilsObjectNameInfoEXT {
         sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
