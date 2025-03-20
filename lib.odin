@@ -952,7 +952,8 @@ quit_vulkan :: proc(gd: ^Graphics_Device) {
     }
 
     for image in gd.images.values {
-        //vma.destroy_image(gd.allocator, image.image, image.allocation)
+        vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
+        vma.destroy_image(gd.allocator, image.image, image.allocation)
     }
 
     for semaphore in gd.semaphores.values {
@@ -3062,6 +3063,11 @@ create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineI
     // Insert pipelines into handlemap
     for pipeline, i in pipelines {
         pipeline_handles[i] = Pipeline_Handle(hm.insert(&gd.pipelines, pipeline))
+    }
+
+    // Destroy lingering shader modules
+    for info in pipeline_create_infos {
+        vk.DestroyShaderModule(gd.device, info.stage.module, gd.alloc_callbacks)
     }
 
     return pipeline_handles
