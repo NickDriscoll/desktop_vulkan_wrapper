@@ -60,7 +60,7 @@ clear :: proc(m: ^$M/Handle_Map($T)) {
 }
 
 @(require_results)
-has_handle :: proc(m: $M/Handle_Map($T), h: Handle) -> bool {
+has_handle :: proc(m: $M/Handle_Map($T), h: $H/Handle) -> bool {
 	if h.index < u32(len(m.sparse_indices)) {
 		return m.sparse_indices[h.index].generation == h.generation
 	}
@@ -68,7 +68,7 @@ has_handle :: proc(m: $M/Handle_Map($T), h: Handle) -> bool {
 }
 
 @(require_results)
-get :: proc(m: ^$M/Handle_Map($T), h: Handle) -> (^T, bool) {
+get :: proc(m: ^$M/Handle_Map($T), h: $H/Handle) -> (^T, bool) {
 	if h.index < u32(len(m.sparse_indices)) {
 		entry := m.sparse_indices[h.index]
 		if entry.generation == h.generation {
@@ -109,7 +109,7 @@ insert :: proc(m: ^$M/Handle_Map($T), value: T) -> (handle: Handle) {
 	return
 }
 
-remove :: proc(m: ^$M/Handle_Map($T), h: Handle) -> (value: Maybe(T)) {
+remove :: proc(m: ^$M/Handle_Map($T), h: $H/Handle) -> (value: Maybe(T)) {
 	if h.index < u32(len(m.sparse_indices)) {
 		entry := &m.sparse_indices[h.index]
 		if entry.generation != h.generation {
