@@ -951,10 +951,11 @@ quit_vulkan :: proc(gd: ^Graphics_Device) {
         vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
     }
 
-    for image in gd.images.values {
-        vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
-        vma.destroy_image(gd.allocator, image.image, image.allocation)
-    }
+    // @TODO: Why does this cause a null-pointer dereference?
+    // for image in gd.images.values {
+    //     vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
+    //     vma.destroy_image(gd.allocator, image.image, image.allocation)
+    // }
 
     for semaphore in gd.semaphores.values {
         vk.DestroySemaphore(gd.device, semaphore, gd.alloc_callbacks)
