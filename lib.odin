@@ -2802,7 +2802,8 @@ GraphicsPipelineInfo :: struct {
     multisample_state: Multisample_State,
     depthstencil_state: DepthStencil_State,
     colorblend_state: ColorBlend_State,
-    renderpass_state: PipelineRenderpass_Info
+    renderpass_state: PipelineRenderpass_Info,
+    name: string,
 }
 
 // @TODO: temp allocator
@@ -3020,6 +3021,12 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
 
     // Put newly created pipelines in the Handle_Map
     for p, i in pipelines {
+        if len(infos[i].name) == 0 {
+            log.warn("Creating graphics pipeline without debug name")
+        } else {
+            s := strings.clone_to_cstring(infos[i].name, context.temp_allocator)
+            assign_debug_name(gd.device, .PIPELINE, u64(p), s)
+        }
         handles[i] = Pipeline_Handle(hm.insert(&gd.pipelines, p))
     }
 
@@ -3028,6 +3035,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
 
 ComputePipelineInfo :: struct {
     compute_shader_bytecode: []u32,
+    name: string
 }
 
 create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineInfo) -> [dynamic]Pipeline_Handle {
@@ -3063,6 +3071,12 @@ create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineI
 
     // Insert pipelines into handlemap
     for pipeline, i in pipelines {
+        if len(infos[i].name) == 0 {
+            log.warn("Creating compute pipeline without debug name")
+        } else {
+            s := strings.clone_to_cstring(infos[i].name, context.temp_allocator)
+            assign_debug_name(gd.device, .PIPELINE, u64(pipeline), s)
+        }
         pipeline_handles[i] = Pipeline_Handle(hm.insert(&gd.pipelines, pipeline))
     }
 
