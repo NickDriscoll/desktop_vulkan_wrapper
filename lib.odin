@@ -1843,7 +1843,7 @@ acquire_swapchain_image :: proc(
     // Wait on swapchain image acquire semaphore
     // and signal when we're done drawing on a different semaphore
     add_wait_op(gd, sync, gd.acquire_semaphores[in_flight_idx(gd)])
-    add_signal_op(gd, sync, gd.present_semaphores[in_flight_idx(gd)])
+    add_signal_op(gd, sync, gd.present_semaphores[out_image_idx])
     
     swapchain_image_handle := gd.swapchain_images[out_image_idx]
 
@@ -1875,8 +1875,7 @@ acquire_swapchain_image :: proc(
 }
 
 present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> bool {
-    idx := in_flight_idx(gd)
-    sem := get_semaphore(gd, gd.present_semaphores[idx]) or_return
+    sem := get_semaphore(gd, gd.present_semaphores[image_idx^]) or_return
     info_res: vk.Result
     info := vk.PresentInfoKHR {
         sType = .PRESENT_INFO_KHR,
