@@ -64,26 +64,18 @@ sync_init :: proc(s: ^Sync_Info) {
     s.signal_ops = make([dynamic]Semaphore_Op)
 }
 
-add_wait_op_binary :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle) {
-    add_wait_op_timeline(gd, i, handle, 0)
-}
-add_signal_op_binary :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle) {
-    add_signal_op_timeline(gd, i, handle, 0)
-}
-add_wait_op_timeline :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle, value: u64) {
+add_wait_op :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle, value : u64 = 0) {
     append(&wait_ops, Semaphore_Op {
         semaphore = handle,
         value = value
     })
 }
-add_signal_op_timeline :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle, value: u64) {
+add_signal_op :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle, value : u64 = 0) {
     append(&signal_ops, Semaphore_Op {
         semaphore = handle,
         value = value
     })
 }
-add_wait_op :: proc { add_wait_op_binary, add_wait_op_timeline }
-add_signal_op :: proc { add_signal_op_binary, add_signal_op_timeline }
 
 delete_sync_info :: proc(using s: ^Sync_Info) {
     delete(wait_ops)
