@@ -2202,6 +2202,8 @@ submit_gfx_and_present :: proc(
 
     submit_gfx_command_buffer(gd, cb_idx, sync)
     present_swapchain_image(gd, swapchain_idx)
+            
+    gd.frame_count += 1
 }
 
 
