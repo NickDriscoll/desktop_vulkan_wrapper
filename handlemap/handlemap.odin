@@ -39,6 +39,7 @@ Handle_Map :: struct($T: typeid) {
 }
 
 init :: proc(m: ^$M/Handle_Map($T), allocator := context.allocator) {
+	m^ = {}
 	m.handles.allocator        = allocator
 	m.values.allocator         = allocator
 	m.sparse_indices.allocator = allocator
@@ -46,6 +47,7 @@ init :: proc(m: ^$M/Handle_Map($T), allocator := context.allocator) {
 }
 
 destroy :: proc(m: ^$M/Handle_Map($T)) {
+	m^ = {}
 	clear(m)
 	delete(m.handles)
 	delete(m.values)
