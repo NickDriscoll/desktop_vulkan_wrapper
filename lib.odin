@@ -1116,7 +1116,7 @@ window_helper_plz_rename :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> 
 }
 
 init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
-    if !sdl2.Vulkan_CreateSurface(window, gd.instance, &gd.surface) do return false
+    sdl2.Vulkan_CreateSurface(window, gd.instance, &gd.surface) or_return
 
     width, height : i32 = 0, 0
     sdl2.Vulkan_GetDrawableSize(window, &width, &height)
