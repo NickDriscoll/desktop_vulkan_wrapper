@@ -102,6 +102,7 @@ Graphics_Device :: struct {
     pipeline_cache: vk.PipelineCache,       // @TODO: Actually use pipeline cache
     alloc_callbacks: ^vk.AllocationCallbacks,
     allocator: vma.Allocator,
+    has_raytracing: bool,
 
     frames_in_flight: u32,
     frame_count: u64,
@@ -173,11 +174,6 @@ Graphics_Device :: struct {
     
 }
 
-API_Version :: enum {
-    Vulkan12,
-    Vulkan13
-}
-
 // @TODO: What am I doing with this?
 debug_utils_callback :: proc "system" (
     messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT,
@@ -199,48 +195,41 @@ Init_Parameters :: struct {
     app_version: u32,
     engine_name: cstring,
     engine_version: u32,
-    api_version: API_Version,       // @TODO: Get rid of this?
-    
+
     allocation_callbacks: ^vk.AllocationCallbacks,
     vk_get_instance_proc_addr: rawptr,
-    
+
     frames_in_flight: u32,      // Maximum number of command buffers active at once
-    
-    
-    window_support: bool        // Will this device need to draw to window surface swapchains?
+
+    window_support: bool,        // Will this device need to draw to window surface swapchains?
+    raytracing_support: bool,    // Will this device need raytracing capabilities?
 
 }
 
-init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
-    assert(frames_in_flight > 0)
+init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
+    assert(params.frames_in_flight > 0)
+
+    gd: Graphics_Device
+    gd.frames_in_flight = params.frames_in_flight
+    gd.alloc_callbacks = params.allocation_callbacks
     
     log.info("Initializing Vulkan instance and device")
     
-    if vk_get_instance_proc_addr == nil {
+    if params.vk_get_instance_proc_addr == nil {
         log.error("Init_Paramenters.vk_get_instance_proc_addr was nil!")
     }
-    vk.load_proc_addresses_global(vk_get_instance_proc_addr)
+    vk.load_proc_addresses_global(params.vk_get_instance_proc_addr)
     
     // Create Vulkan instance
     // @TODO: Look into vkEnumerateInstanceVersion()
-    inst: vk.Instance
-    api_version_int: u32
+    api_version_int : u32 = vk.API_VERSION_1_3
     {
-        switch api_version {
-            case .Vulkan12:
-                log.info("Selected Vulkan 1.2")
-                api_version_int = vk.API_VERSION_1_2
-            case .Vulkan13:
-                log.info("Selected Vulkan 1.3")
-                api_version_int = vk.API_VERSION_1_3
-        }
-        
         // Instead of forcing the caller to explicitly provide
         // the extensions they want to enable, I want to provide high-level
         // idioms that cover many extensions in the same logical category
-        extensions: [dynamic]cstring
-        defer delete(extensions)
-        if window_support {
+        
+        extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
+        if params.window_support {
             append(&extensions, vk.KHR_SURFACE_EXTENSION_NAME)
             when ODIN_OS == .Windows {
                 append(&extensions, vk.KHR_WIN32_SURFACE_EXTENSION_NAME)
@@ -265,10 +254,10 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         app_info := vk.ApplicationInfo {
             sType = .APPLICATION_INFO,
             pNext = nil,
-            pApplicationName = app_name,
-            applicationVersion = app_version,
-            pEngineName = engine_name,
-            engineVersion = engine_version,
+            pApplicationName = params.app_name,
+            applicationVersion = params.app_version,
+            pEngineName = params.engine_name,
+            engineVersion = params.engine_version,
             apiVersion = api_version_int
         }
         create_info := vk.InstanceCreateInfo {
@@ -282,29 +271,23 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             ppEnabledExtensionNames = raw_data(extensions)
         }
         
-        if vk.CreateInstance(&create_info, allocation_callbacks, &inst) != .SUCCESS {
+        if vk.CreateInstance(&create_info, params.allocation_callbacks, &gd.instance) != .SUCCESS {
             log.error("Instance creation failed.")
         }
     }
 
     // Load instance-level procedures
-    vk.load_proc_addresses_instance(inst)
+    vk.load_proc_addresses_instance(gd.instance)
 
     // Create Vulkan device
-    phys_device: vk.PhysicalDevice
-    properties: vk.PhysicalDeviceProperties2
-    device: vk.Device
-    gfx_queue_family: u32
-    compute_queue_family: u32
-    transfer_queue_family: u32
     {
         phys_device_count : u32 = 0
-        vk.EnumeratePhysicalDevices(inst, &phys_device_count, nil)
+        vk.EnumeratePhysicalDevices(gd.instance, &phys_device_count, nil)
         
         phys_devices: [dynamic]vk.PhysicalDevice
         resize(&phys_devices, int(phys_device_count))
         defer delete(phys_devices)
-        vk.EnumeratePhysicalDevices(inst, &phys_device_count, raw_data(phys_devices))
+        vk.EnumeratePhysicalDevices(gd.instance, &phys_device_count, raw_data(phys_devices))
         
         // Select the physical device to use
         // @NOTE: We only support using a single physical device at once
@@ -340,6 +323,9 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 features.pNext = &sync2_features
                 vk.GetPhysicalDeviceFeatures2(pd, &features)
 
+                // Check for raytracing features
+                //if 
+
                 has_right_features :=
                     vulkan_11_features.variablePointers &&
                     vulkan_12_features.descriptorIndexing &&
@@ -349,19 +335,19 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                     dynamic_rendering_features.dynamicRendering &&
                     sync2_features.synchronization2 
                 if has_right_features {
-                    phys_device = pd
-                    properties = props
+                    gd.physical_device = pd
+                    gd.physical_device_properties = props
                     log.infof("Chosen GPU: %s", string_from_bytes(props.properties.deviceName[:]))
                     break
                 }
             }
         }
 
-        assert(phys_device != nil, "Didn't find vkPhysicalDevice")
+        assert(gd.physical_device != nil, "Didn't find VkPhysicalDevice")
 
         // Query the physical device's queue family properties
         queue_family_count : u32 = 0
-        vk.GetPhysicalDeviceQueueFamilyProperties2(phys_device, &queue_family_count, nil)
+        vk.GetPhysicalDeviceQueueFamilyProperties2(gd.physical_device, &queue_family_count, nil)
 
         qfps: [dynamic]vk.QueueFamilyProperties2
         resize(&qfps, int(queue_family_count))
@@ -369,16 +355,16 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         for &qfp in qfps {
             qfp.sType = .QUEUE_FAMILY_PROPERTIES_2
         }
-        vk.GetPhysicalDeviceQueueFamilyProperties2(phys_device, &queue_family_count, raw_data(qfps))
+        vk.GetPhysicalDeviceQueueFamilyProperties2(gd.physical_device, &queue_family_count, raw_data(qfps))
 
         //Load all supported device extensions for later querying
         extension_count : u32 = 0
-        vk.EnumerateDeviceExtensionProperties(phys_device, nil, &extension_count, nil)
+        vk.EnumerateDeviceExtensionProperties(gd.physical_device, nil, &extension_count, nil)
 
         device_extensions: [dynamic]vk.ExtensionProperties
         defer delete(device_extensions)
         resize(&device_extensions, int(extension_count))
-        vk.EnumerateDeviceExtensionProperties(phys_device, nil, &extension_count, raw_data(device_extensions))
+        vk.EnumerateDeviceExtensionProperties(gd.physical_device, nil, &extension_count, raw_data(device_extensions))
 
         // Query for extension support,
         // namely Sync2 and dynamic rendering support for now
@@ -386,21 +372,8 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             return string(bytes[0:len(s)]) == s
         }
         
-        necessary_extensions: []string
-        switch api_version {
-            case .Vulkan12: {
-                necessary_extensions = {
-                    vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
-                    vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-                    vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
-                    vk.EXT_MEMORY_BUDGET_EXTENSION_NAME
-                }
-            }
-            case .Vulkan13: {
-                necessary_extensions = {
-                    vk.EXT_MEMORY_BUDGET_EXTENSION_NAME
-                }
-            }
+        necessary_extensions: []string = {
+            vk.EXT_MEMORY_BUDGET_EXTENSION_NAME
         }
 
         extension_flags: bit_set[0..<4] = {}
@@ -422,21 +395,21 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         // Determine available queue family types
         for qfp, i in qfps {
             flags := qfp.queueFamilyProperties.queueFlags
-            if vk.QueueFlag.GRAPHICS in flags do gfx_queue_family = u32(i)
+            if vk.QueueFlag.GRAPHICS in flags do gd.gfx_queue_family = u32(i)
         }
-        compute_queue_family = gfx_queue_family
-        transfer_queue_family = gfx_queue_family
+        gd.compute_queue_family = gd.gfx_queue_family
+        gd.transfer_queue_family = gd.gfx_queue_family
         log.debug("Queue family profile flags...")
         for qfp, i in qfps {
             flags := qfp.queueFamilyProperties.queueFlags
             log.debugf("%#v", qfp.queueFamilyProperties.queueFlags)
             
             if .COMPUTE&.TRANSFER in flags {
-                compute_queue_family = u32(i)
-                transfer_queue_family = u32(i)
+                gd.compute_queue_family = u32(i)
+                gd.transfer_queue_family = u32(i)
             }
-            else if vk.QueueFlag.COMPUTE in flags do compute_queue_family = u32(i)
-            else if vk.QueueFlag.TRANSFER in flags do transfer_queue_family = u32(i)
+            else if vk.QueueFlag.COMPUTE in flags do gd.compute_queue_family = u32(i)
+            else if vk.QueueFlag.TRANSFER in flags do gd.transfer_queue_family = u32(i)
         }
 
         queue_priority : f32 = 1.0
@@ -446,28 +419,28 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             sType = .DEVICE_QUEUE_CREATE_INFO,
             pNext = nil,
             flags = nil,
-            queueFamilyIndex = gfx_queue_family,
+            queueFamilyIndex = gd.gfx_queue_family,
             queueCount = 1,
             pQueuePriorities = &queue_priority
         }
-        if compute_queue_family != gfx_queue_family {
+        if gd.compute_queue_family != gd.gfx_queue_family {
             queue_count += 1
             queue_create_infos[1] = vk.DeviceQueueCreateInfo {
                 sType = .DEVICE_QUEUE_CREATE_INFO,
                 pNext = nil,
                 flags = nil,
-                queueFamilyIndex = compute_queue_family,
+                queueFamilyIndex = gd.compute_queue_family,
                 queueCount = 1,
                 pQueuePriorities = &queue_priority
             }
         }
-        if transfer_queue_family != compute_queue_family {
+        if gd.transfer_queue_family != gd.compute_queue_family {
             queue_count += 1
             queue_create_infos[2] = vk.DeviceQueueCreateInfo {
                 sType = .DEVICE_QUEUE_CREATE_INFO,
                 pNext = nil,
                 flags = nil,
-                queueFamilyIndex = transfer_queue_family,
+                queueFamilyIndex = gd.transfer_queue_family,
                 queueCount = 1,
                 pQueuePriorities = &queue_priority
             }
@@ -477,13 +450,8 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         extensions: [dynamic]cstring
         defer delete(extensions)
         append(&extensions, vk.EXT_MEMORY_BUDGET_EXTENSION_NAME)
-        if window_support {
+        if params.window_support {
             append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
-        }
-        if api_version == .Vulkan12 {
-            append(&extensions, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
-            append(&extensions, vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
-            append(&extensions, vk.KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
         }
         
         // Create logical device
@@ -499,13 +467,13 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             pEnabledFeatures = nil
         }
         
-        if vk.CreateDevice(phys_device, &create_info, allocation_callbacks, &device) != .SUCCESS {
+        if vk.CreateDevice(gd.physical_device, &create_info, params.allocation_callbacks, &gd.device) != .SUCCESS {
             log.error("Failed to create device.")
         }
     }
 
     //Load proc addrs that come from the device driver
-    vk.load_proc_addresses_device(device)
+    vk.load_proc_addresses_device(gd.device)
 
     // Drivers won't report a function with e.g. a KHR suffix if it has
     // been promoted to core in the requested Vulkan version which is super annoying
@@ -530,7 +498,6 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
     }
 
     // Initialize the Vulkan Memory Allocator
-    allocator: vma.Allocator
     {
         // We have to redefine these function aliases in order to
         // ensure VMA is able to find all the functions
@@ -543,25 +510,25 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
 
         info := vma.Allocator_Create_Info {
             flags = {.Externally_Synchronized,.Buffer_Device_Address,.Ext_Memory_Budget},
-            physical_device = phys_device,
-            device = device,
+            physical_device = gd.physical_device,
+            device = gd.device,
             preferred_large_heap_block_size = 0,
-            allocation_callbacks = allocation_callbacks,
+            allocation_callbacks = params.allocation_callbacks,
             device_memory_callbacks = nil,
             heap_size_limit = nil,
             vulkan_functions = &fns,
-            instance = inst,
+            instance = gd.instance,
             vulkan_api_version = api_version_int,
             type_external_memory_handle_types = nil            
         }
-        if vma.create_allocator(&info, &allocator) != .SUCCESS {
+        if vma.create_allocator(&info, &gd.allocator) != .SUCCESS {
             log.error("Failed to initialize VMA.")
         }
 
         // Debug printing
-        budget: vma.Budget
-        vma.get_heap_budgets(allocator, &budget)
-        log.debugf("%#v", budget)
+        // budget: vma.Budget
+        // vma.get_heap_budgets(gd.allocator, &budget)
+        // log.debugf("%#v", budget)
 
         // stats: vma.Total_Statistics
         // vma.calculate_statistics(allocator, &stats)
@@ -570,101 +537,92 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
 
     // Cache individual queues
     // We only use one queue from each family
-    gfx_queue: vk.Queue
-    compute_queue: vk.Queue
-    transfer_queue: vk.Queue
     {
-        vk.GetDeviceQueue(device, gfx_queue_family, 0, &gfx_queue)
-        vk.GetDeviceQueue(device, compute_queue_family, 0, &compute_queue)
-        vk.GetDeviceQueue(device, transfer_queue_family, 0, &transfer_queue)
+        vk.GetDeviceQueue(gd.device, gd.gfx_queue_family, 0, &gd.gfx_queue)
+        vk.GetDeviceQueue(gd.device, gd.compute_queue_family, 0, &gd.compute_queue)
+        vk.GetDeviceQueue(gd.device, gd.transfer_queue_family, 0, &gd.transfer_queue)
 
         // Debug names
-        assign_debug_name(device, .QUEUE, u64(uintptr(gfx_queue)), "GFX Queue")
+        assign_debug_name(gd.device, .QUEUE, u64(uintptr(gd.gfx_queue)), "GFX Queue")
 
-        if compute_queue != gfx_queue {
-            assign_debug_name(device, .QUEUE, u64(uintptr(compute_queue)), "Compute Queue")
+        if gd.compute_queue != gd.gfx_queue {
+            assign_debug_name(gd.device, .QUEUE, u64(uintptr(gd.compute_queue)), "Compute Queue")
         }
 
-        if transfer_queue != gfx_queue {
-            assign_debug_name(device, .QUEUE, u64(uintptr(transfer_queue)), "Transfer Queue")
+        if gd.transfer_queue != gd.gfx_queue {
+            assign_debug_name(gd.device, .QUEUE, u64(uintptr(gd.transfer_queue)), "Transfer Queue")
         }
     }
 
     // Create command buffer state
-    gfx_command_pool: vk.CommandPool
-    compute_command_pool: vk.CommandPool
-    transfer_command_pool: vk.CommandPool
     {
         gfx_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
             pNext = nil,
             flags = {vk.CommandPoolCreateFlag.TRANSIENT, vk.CommandPoolCreateFlag.RESET_COMMAND_BUFFER},
-            queueFamilyIndex = gfx_queue_family
+            queueFamilyIndex = gd.gfx_queue_family
         }
-        if vk.CreateCommandPool(device, &gfx_pool_info, allocation_callbacks, &gfx_command_pool) != .SUCCESS {
+        if vk.CreateCommandPool(gd.device, &gfx_pool_info, params.allocation_callbacks, &gd.gfx_command_pool) != .SUCCESS {
             log.error("Failed to create gfx command pool")
         }
-        assign_debug_name(device, .COMMAND_POOL, u64(gfx_command_pool), "GFX Command Pool")
+        assign_debug_name(gd.device, .COMMAND_POOL, u64(gd.gfx_command_pool), "GFX Command Pool")
         
         compute_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
             pNext = nil,
             flags = {vk.CommandPoolCreateFlag.TRANSIENT, vk.CommandPoolCreateFlag.RESET_COMMAND_BUFFER},
-            queueFamilyIndex = compute_queue_family
+            queueFamilyIndex = gd.compute_queue_family
         }
-        if vk.CreateCommandPool(device, &compute_pool_info, allocation_callbacks, &compute_command_pool) != .SUCCESS {
+        if vk.CreateCommandPool(gd.device, &compute_pool_info, params.allocation_callbacks, &gd.compute_command_pool) != .SUCCESS {
             log.error("Failed to create compute command pool")
         }
-        assign_debug_name(device, .COMMAND_POOL, u64(compute_command_pool), "Compute Command Pool")
+        assign_debug_name(gd.device, .COMMAND_POOL, u64(gd.compute_command_pool), "Compute Command Pool")
         
         transfer_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
             pNext = nil,
             flags = {vk.CommandPoolCreateFlag.TRANSIENT, vk.CommandPoolCreateFlag.RESET_COMMAND_BUFFER},
-            queueFamilyIndex = transfer_queue_family
+            queueFamilyIndex = gd.transfer_queue_family
         }
-        if vk.CreateCommandPool(device, &transfer_pool_info, allocation_callbacks, &transfer_command_pool) != .SUCCESS {
+        if vk.CreateCommandPool(gd.device, &transfer_pool_info, params.allocation_callbacks, &gd.transfer_command_pool) != .SUCCESS {
             log.error("Failed to create transfer command pool")
         }
-        assign_debug_name(device, .COMMAND_POOL, u64(transfer_command_pool), "Transfer Command Pool")
+        assign_debug_name(gd.device, .COMMAND_POOL, u64(gd.transfer_command_pool), "Transfer Command Pool")
     }
 
     // Create command buffers
-    gfx_command_buffers: [dynamic]vk.CommandBuffer
-    resize(&gfx_command_buffers, int(frames_in_flight))
-    compute_command_buffers: [dynamic]vk.CommandBuffer
-    resize(&compute_command_buffers, int(frames_in_flight))
-    transfer_command_buffers: [dynamic]vk.CommandBuffer
-    resize(&transfer_command_buffers, int(frames_in_flight))
+    gd.gfx_command_buffers = make([dynamic]vk.CommandBuffer, params.frames_in_flight, context.allocator)
+    gd.compute_command_buffers = make([dynamic]vk.CommandBuffer, params.frames_in_flight, context.allocator)
+    gd.transfer_command_buffers = make([dynamic]vk.CommandBuffer, params.frames_in_flight, context.allocator)
     {
         gfx_info := vk.CommandBufferAllocateInfo {
             sType = .COMMAND_BUFFER_ALLOCATE_INFO,
             pNext = nil,
-            commandPool = gfx_command_pool,
+            commandPool = gd.gfx_command_pool,
             level = .PRIMARY,
-            commandBufferCount = frames_in_flight
+            commandBufferCount = params.frames_in_flight
         }
-        if vk.AllocateCommandBuffers(device, &gfx_info, raw_data(gfx_command_buffers)) != .SUCCESS {
+        if vk.AllocateCommandBuffers(gd.device, &gfx_info, &gd.gfx_command_buffers[0]) != .SUCCESS {
             log.error("Failed to create gfx command buffers")
         }
         compute_info := vk.CommandBufferAllocateInfo {
             sType = .COMMAND_BUFFER_ALLOCATE_INFO,
             pNext = nil,
-            commandPool = compute_command_pool,
+            commandPool = gd.compute_command_pool,
             level = .PRIMARY,
-            commandBufferCount = frames_in_flight
+            commandBufferCount = params.frames_in_flight
         }
-        if vk.AllocateCommandBuffers(device, &compute_info, raw_data(compute_command_buffers)) != .SUCCESS {
+        if vk.AllocateCommandBuffers(gd.device, &compute_info, &gd.compute_command_buffers[0]) != .SUCCESS {
             log.error("Failed to create compute command buffers")
         }
         transfer_info := vk.CommandBufferAllocateInfo {
             sType = .COMMAND_BUFFER_ALLOCATE_INFO,
             pNext = nil,
-            commandPool = transfer_command_pool,
+            commandPool = gd.transfer_command_pool,
             level = .PRIMARY,
-            commandBufferCount = frames_in_flight
+            commandBufferCount = params.frames_in_flight
         }
-        if vk.AllocateCommandBuffers(device, &transfer_info, raw_data(transfer_command_buffers)) != .SUCCESS {
+        if vk.AllocateCommandBuffers(gd.device, &transfer_info, &gd.transfer_command_buffers[0]) != .SUCCESS {
             log.error("Failed to create transfer command buffers")
         }
 
@@ -672,36 +630,32 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
         sb: strings.Builder
         defer strings.builder_destroy(&sb)
         strings.builder_init(&sb, allocator = context.temp_allocator)
-        for i in 0..<frames_in_flight {
-            my_name := fmt.sbprintf(&sb, "GFX Command Buffer #%v", i)
-            c_name := strings.unsafe_string_to_cstring(my_name)
-            assign_debug_name(device, .COMMAND_BUFFER, u64(uintptr(gfx_command_buffers[i])), c_name)
+        for i in 0..<params.frames_in_flight {
+            fmt.sbprintf(&sb, "GFX Command Buffer #%v", i)
+            c_name, _ := strings.to_cstring(&sb)
+            assign_debug_name(gd.device, .COMMAND_BUFFER, u64(uintptr(gd.gfx_command_buffers[i])), c_name)
             strings.builder_reset(&sb)
         }
-        for i in 0..<frames_in_flight {
-            my_name := fmt.sbprintf(&sb, "Compute Command Buffer #%v", i)
-            c_name := strings.unsafe_string_to_cstring(my_name)
-            assign_debug_name(device, .COMMAND_BUFFER, u64(uintptr(compute_command_buffers[i])), c_name)
+        for i in 0..<params.frames_in_flight {
+            fmt.sbprintf(&sb, "Compute Command Buffer #%v", i)
+            c_name, _ := strings.to_cstring(&sb)
+            assign_debug_name(gd.device, .COMMAND_BUFFER, u64(uintptr(gd.compute_command_buffers[i])), c_name)
             strings.builder_reset(&sb)
         }
-        for i in 0..<frames_in_flight {
-            my_name := fmt.sbprintf(&sb, "Transfer Command Buffer #%v", i)
-            c_name := strings.unsafe_string_to_cstring(my_name)
-            assign_debug_name(device, .COMMAND_BUFFER, u64(uintptr(transfer_command_buffers[i])), c_name)
+        for i in 0..<params.frames_in_flight {
+            fmt.sbprintf(&sb, "Transfer Command Buffer #%v", i)
+            c_name, _ := strings.to_cstring(&sb)
+            assign_debug_name(gd.device, .COMMAND_BUFFER, u64(uintptr(gd.transfer_command_buffers[i])), c_name)
             strings.builder_reset(&sb)
         }
     }
 
     // Create bindless descriptor set
     samplers: [TOTAL_IMMUTABLE_SAMPLERS]vk.Sampler
-    ds_layout: vk.DescriptorSetLayout
-    dp: vk.DescriptorPool
-    ds: vk.DescriptorSet
     {
         // Create immutable samplers
         {
             sampler_infos := make([dynamic]vk.SamplerCreateInfo, len = 0, cap = TOTAL_IMMUTABLE_SAMPLERS, allocator = context.temp_allocator)
-            defer delete(sampler_infos)
             append(&sampler_infos, vk.SamplerCreateInfo {
                 sType = .SAMPLER_CREATE_INFO,
                 pNext = nil,
@@ -744,15 +698,15 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
                 maxAnisotropy = 16.0
             })
 
-            debug_names : []cstring = {
-                "Aniso 16 Sampler",
-                "Point Sampler",
-                "PostFX Sampler",
+            debug_names : [Immutable_Sampler_Index]cstring = {
+                .Aniso16 = "Aniso 16 Sampler",
+                .Point = "Point Sampler",
+                .PostFX = "PostFX Sampler",
             }
 
             for &s, i in sampler_infos {
-                vk.CreateSampler(device, &s, allocation_callbacks, &samplers[i])
-                assign_debug_name(device, .SAMPLER, u64(samplers[i]), debug_names[i])
+                vk.CreateSampler(gd.device, &s, params.allocation_callbacks, &samplers[i])
+                assign_debug_name(gd.device, .SAMPLER, u64(samplers[i]), debug_names[Immutable_Sampler_Index(i)])
             }
         }
 
@@ -787,7 +741,7 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             bindingCount = 2,
             pBindings = raw_data(bindings[:])
         }
-        if vk.CreateDescriptorSetLayout(device, &layout_info, allocation_callbacks, &ds_layout) != .SUCCESS {
+        if vk.CreateDescriptorSetLayout(gd.device, &layout_info, params.allocation_callbacks, &gd.descriptor_set_layout) != .SUCCESS {
             log.error("Failed to create static descriptor set layout.")
         }
 
@@ -810,25 +764,23 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             poolSizeCount = u32(len(sizes)),
             pPoolSizes = raw_data(sizes[:])
         }
-        if vk.CreateDescriptorPool(device, &pool_info, allocation_callbacks, &dp) != .SUCCESS {
+        if vk.CreateDescriptorPool(gd.device, &pool_info, params.allocation_callbacks, &gd.descriptor_pool) != .SUCCESS {
             log.error("Failed to create descriptor pool.")
         }
 
         set_info := vk.DescriptorSetAllocateInfo {
             sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
             pNext = nil,
-            descriptorPool = dp,
+            descriptorPool = gd.descriptor_pool,
             descriptorSetCount = 1,
-            pSetLayouts = &ds_layout
+            pSetLayouts = &gd.descriptor_set_layout
         }
-        if vk.AllocateDescriptorSets(device, &set_info, &ds) != .SUCCESS {
+        if vk.AllocateDescriptorSets(gd.device, &set_info, &gd.descriptor_set) != .SUCCESS {
             log.error("Failed to allocate descriptor sets.")
         }
     }
 
     // Create global pipeline layout
-    gfx_p_layout: vk.PipelineLayout
-    comp_p_layout: vk.PipelineLayout
     {
         pc_range := vk.PushConstantRange {
             stageFlags = {.VERTEX,.FRAGMENT},
@@ -840,11 +792,11 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             pNext = nil,
             flags = nil,
             setLayoutCount = 1,
-            pSetLayouts = &ds_layout,
+            pSetLayouts = &gd.descriptor_set_layout,
             pushConstantRangeCount = 1,
             pPushConstantRanges = &pc_range
         }
-        if vk.CreatePipelineLayout(device, &layout_info, allocation_callbacks, &gfx_p_layout) != .SUCCESS {
+        if vk.CreatePipelineLayout(gd.device, &layout_info, params.allocation_callbacks, &gd.gfx_pipeline_layout) != .SUCCESS {
             log.error("Failed to create graphics pipeline layout.")
         }
 
@@ -858,41 +810,13 @@ init_vulkan :: proc(using params: ^Init_Parameters) -> Graphics_Device {
             pNext = nil,
             flags = nil,
             setLayoutCount = 1,
-            pSetLayouts = &ds_layout,
+            pSetLayouts = &gd.descriptor_set_layout,
             pushConstantRangeCount = 1,
             pPushConstantRanges = &pc_range
         }
-        if vk.CreatePipelineLayout(device, &layout_info, allocation_callbacks, &comp_p_layout) != .SUCCESS {
+        if vk.CreatePipelineLayout(gd.device, &layout_info, params.allocation_callbacks, &gd.compute_pipeline_layout) != .SUCCESS {
             log.error("Failed to create graphics pipeline layout.")
         }
-    }
-
-    gd := Graphics_Device {
-        instance = inst,
-        physical_device = phys_device,
-        physical_device_properties = properties,
-        device = device,
-        frames_in_flight = frames_in_flight,
-        alloc_callbacks = allocation_callbacks,
-        allocator = allocator,
-        gfx_queue_family = gfx_queue_family,
-        compute_queue_family = compute_queue_family,
-        transfer_queue_family = transfer_queue_family,
-        gfx_queue = gfx_queue,
-        compute_queue = compute_queue,
-        transfer_queue = transfer_queue,
-        gfx_command_pool = gfx_command_pool,
-        compute_command_pool = compute_command_pool,
-        transfer_command_pool = transfer_command_pool,
-        gfx_command_buffers = gfx_command_buffers,
-        compute_command_buffers = compute_command_buffers,
-        transfer_command_buffers = transfer_command_buffers,
-        immutable_samplers = samplers,
-        descriptor_set_layout = ds_layout,
-        descriptor_pool = dp,
-        descriptor_set = ds,
-        gfx_pipeline_layout = gfx_p_layout,
-        compute_pipeline_layout = comp_p_layout,
     }
 
     // Init Handle_Maps
@@ -3080,3 +3004,10 @@ create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineI
 
     return pipeline_handles
 }
+
+
+
+// Acceleration structure section
+
+
+
