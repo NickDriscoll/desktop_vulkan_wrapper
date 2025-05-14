@@ -283,10 +283,8 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
     {
         phys_device_count : u32 = 0
         vk.EnumeratePhysicalDevices(gd.instance, &phys_device_count, nil)
-        
-        phys_devices: [dynamic]vk.PhysicalDevice
-        resize(&phys_devices, int(phys_device_count))
-        defer delete(phys_devices)
+
+        phys_devices := make([dynamic]vk.PhysicalDevice, phys_device_count, context.temp_allocator)
         vk.EnumeratePhysicalDevices(gd.instance, &phys_device_count, raw_data(phys_devices))
         
         // Select the physical device to use
@@ -295,9 +293,11 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
         for pd in phys_devices {
             // Query this physical device's properties
             vk12_props: vk.PhysicalDeviceVulkan12Properties
-            vk12_props.sType = .PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES
             props: vk.PhysicalDeviceProperties2
+
+            vk12_props.sType = .PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES
             props.sType = .PHYSICAL_DEVICE_PROPERTIES_2
+
             props.pNext = &vk12_props
             vk.GetPhysicalDeviceProperties2(pd, &props)
             
@@ -349,9 +349,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
         queue_family_count : u32 = 0
         vk.GetPhysicalDeviceQueueFamilyProperties2(gd.physical_device, &queue_family_count, nil)
 
-        qfps: [dynamic]vk.QueueFamilyProperties2
-        resize(&qfps, int(queue_family_count))
-        defer delete(qfps)
+        qfps := make([dynamic]vk.QueueFamilyProperties2, queue_family_count, context.temp_allocator)
         for &qfp in qfps {
             qfp.sType = .QUEUE_FAMILY_PROPERTIES_2
         }
@@ -361,9 +359,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
         extension_count : u32 = 0
         vk.EnumerateDeviceExtensionProperties(gd.physical_device, nil, &extension_count, nil)
 
-        device_extensions: [dynamic]vk.ExtensionProperties
-        defer delete(device_extensions)
-        resize(&device_extensions, int(extension_count))
+        device_extensions := make([dynamic]vk.ExtensionProperties, extension_count, context.temp_allocator)
         vk.EnumerateDeviceExtensionProperties(gd.physical_device, nil, &extension_count, raw_data(device_extensions))
 
         // Query for extension support,
@@ -447,8 +443,8 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
         }
 
         // Device extensions
-        extensions: [dynamic]cstring
-        defer delete(extensions)
+        extensions := make([dynamic]cstring, 0, 4, context.temp_allocator)
+
         append(&extensions, vk.EXT_MEMORY_BUDGET_EXTENSION_NAME)
         if params.window_support {
             append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
@@ -524,15 +520,6 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
         if vma.create_allocator(&info, &gd.allocator) != .SUCCESS {
             log.error("Failed to initialize VMA.")
         }
-
-        // Debug printing
-        // budget: vma.Budget
-        // vma.get_heap_budgets(gd.allocator, &budget)
-        // log.debugf("%#v", budget)
-
-        // stats: vma.Total_Statistics
-        // vma.calculate_statistics(allocator, &stats)
-        // log.debugf("%#v", stats)
     }
 
     // Cache individual queues
@@ -628,7 +615,6 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
 
         // Debug naming
         sb: strings.Builder
-        defer strings.builder_destroy(&sb)
         strings.builder_init(&sb, allocator = context.temp_allocator)
         for i in 0..<params.frames_in_flight {
             fmt.sbprintf(&sb, "GFX Command Buffer #%v", i)
@@ -1402,7 +1388,6 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
     // Set debug names
     if len(name) > 0 {
         sb: strings.Builder
-        defer strings.builder_destroy(&sb)
         strings.builder_init(&sb, allocator = context.temp_allocator)
         image_name := fmt.sbprintf(&sb, "%v image", image_info.name)
         assign_debug_name(gd.device, .IMAGE, u64(image.image), strings.unsafe_string_to_cstring(image_name))
@@ -1542,14 +1527,14 @@ get_image_vkhandle :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> (h: vk
 // Use when the data is small or if you don't care about stalling
 sync_create_image_with_data :: proc(
     gd: ^Graphics_Device,
-    using create_info: ^Image_Create,
+    create_info: ^Image_Create,
     bytes: []byte
 ) -> (out_handle: Image_Handle, ok: bool) {
     // Create image first
     out_handle = create_image(gd, create_info)
     out_image := hm.get(&gd.images, hm.Handle(out_handle)) or_return
 
-    using extent
+    extent := &create_info.extent
 
     cb_idx := CommandBuffer_Index(in_flight_idx(gd))
     cb := gd.transfer_command_buffers[cb_idx]
@@ -1621,9 +1606,9 @@ sync_create_image_with_data :: proc(
                 z = 0
             },
             imageExtent = {
-                width = width,
-                height = height,
-                depth = depth
+                width = extent.width,
+                height = extent.height,
+                depth = extent.depth
             }
         }
         vk.CmdCopyBufferToImage(cb, sb.buffer, out_image.image, .TRANSFER_DST_OPTIMAL, 1, &image_copy)
@@ -1709,7 +1694,7 @@ sync_create_image_with_data :: proc(
 
 
     aspect_mask : vk.ImageAspectFlags = {.COLOR}
-    if format == .D32_SFLOAT {
+    if create_info.format == .D32_SFLOAT {
         aspect_mask = {.DEPTH}
     }
 
