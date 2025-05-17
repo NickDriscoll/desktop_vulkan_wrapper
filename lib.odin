@@ -206,20 +206,20 @@ Init_Parameters :: struct {
 
 }
 
-init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
+init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
     assert(params.frames_in_flight > 0)
 
     gd: Graphics_Device
     gd.frames_in_flight = params.frames_in_flight
     gd.alloc_callbacks = params.allocation_callbacks
-    
+
     log.info("Initializing Vulkan instance and device")
-    
+
     if params.vk_get_instance_proc_addr == nil {
         log.error("Init_Paramenters.vk_get_instance_proc_addr was nil!")
     }
     vk.load_proc_addresses_global(params.vk_get_instance_proc_addr)
-    
+
     // Create Vulkan instance
     // @TODO: Look into vkEnumerateInstanceVersion()
     api_version_int : u32 = vk.API_VERSION_1_3
@@ -235,8 +235,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
                 append(&extensions, vk.KHR_WIN32_SURFACE_EXTENSION_NAME)
             }
             when ODIN_OS == .Linux {
-                // @TODO: why is there no vk.KHR_XLIB_SURFACE_EXTENSION_NAME?
-                append(&extensions, "VK_KHR_xlib_surface")
+                append(&extensions, vk.KHR_XLIB_SURFACE_EXTENSION_NAME)
             }
         }
 
@@ -271,8 +270,10 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
             ppEnabledExtensionNames = raw_data(extensions)
         }
         
-        if vk.CreateInstance(&create_info, params.allocation_callbacks, &gd.instance) != .SUCCESS {
+        r := vk.CreateInstance(&create_info, params.allocation_callbacks, &gd.instance)
+        if r != .SUCCESS {
             log.error("Instance creation failed.")
+            return gd, r
         }
     }
 
@@ -444,10 +445,13 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
 
         // Device extensions
         extensions := make([dynamic]cstring, 0, 4, context.temp_allocator)
-
         append(&extensions, vk.EXT_MEMORY_BUDGET_EXTENSION_NAME)
         if params.window_support {
             append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+        }
+        if params.raytracing_support {
+            append(&extensions, "VK_KHR_deferred_host_operations")
+            append(&extensions, vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
         }
         
         // Create logical device
@@ -463,8 +467,10 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
             pEnabledFeatures = nil
         }
         
-        if vk.CreateDevice(gd.physical_device, &create_info, params.allocation_callbacks, &gd.device) != .SUCCESS {
+        r := vk.CreateDevice(gd.physical_device, &create_info, params.allocation_callbacks, &gd.device)
+        if r != .SUCCESS {
             log.error("Failed to create device.")
+            return gd, r
         }
     }
 
@@ -842,7 +848,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> Graphics_Device {
         gd.transfer_timeline = create_semaphore(&gd, &info)
     }
 
-    return gd
+    return gd, nil
 }
 
 quit_vulkan :: proc(gd: ^Graphics_Device) {
