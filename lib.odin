@@ -189,6 +189,11 @@ string_from_bytes :: proc(bytes: []u8) -> string {
     return strings.string_from_null_terminated_ptr(&bytes[0], len(bytes))
 }
 
+SupportFlags :: bit_set[enum {
+    Window,              // Will this device need to draw to window surface swapchains?
+    Raytracing,          // Will this device need raytracing capabilities?
+}]
+
 Init_Parameters :: struct {
     // Vulkan instance creation parameters
     app_name: cstring,
@@ -201,9 +206,7 @@ Init_Parameters :: struct {
 
     frames_in_flight: u32,      // Maximum number of command buffers active at once
 
-    window_support: bool,        // Will this device need to draw to window surface swapchains?
-    raytracing_support: bool,    // Will this device need raytracing capabilities?
-
+    support_flags: SupportFlags
 }
 
 init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
@@ -229,7 +232,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
         // idioms that cover many extensions in the same logical category
         
         extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
-        if params.window_support {
+        if .Window in params.support_flags {
             append(&extensions, vk.KHR_SURFACE_EXTENSION_NAME)
             when ODIN_OS == .Windows {
                 append(&extensions, vk.KHR_WIN32_SURFACE_EXTENSION_NAME)
@@ -446,10 +449,10 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
         // Device extensions
         extensions := make([dynamic]cstring, 0, 4, context.temp_allocator)
         append(&extensions, vk.EXT_MEMORY_BUDGET_EXTENSION_NAME)
-        if params.window_support {
+        if .Window in params.support_flags {
             append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
         }
-        if params.raytracing_support {
+        if .Raytracing in params.support_flags {
             append(&extensions, "VK_KHR_deferred_host_operations")
             append(&extensions, vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
         }
@@ -3001,5 +3004,65 @@ create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineI
 
 // Acceleration structure section
 
+AccelerationStructureGeometry :: struct {
+    type: vk.GeometryTypeKHR,
+    geometry: vk.AccelerationStructureGeometryDataKHR,
+    flags: vk.GeometryFlagsKHR
+}
+AccelerationStructureInfo :: struct {
+    type: vk.AccelerationStructureTypeKHR,
+    flags: vk.BuildAccelerationStructureFlagsKHR,
+    mode: vk.BuildAccelerationStructureModeKHR,
+    src: vk.AccelerationStructureKHR,
+    dst: vk.AccelerationStructureKHR,
+    geometries: []AccelerationStructureGeometry,
+    scratch_data: vk.DeviceOrHostAddressKHR,
+    range_info: vk.AccelerationStructureBuildRangeInfoKHR,
+}
 
+cmd_build_acceleration_structures :: proc(
+    gd: ^Graphics_Device,
+    infos: []AccelerationStructureInfo
+) {
+    cb := gd.gfx_command_buffers[in_flight_idx(gd)]
+
+    g_infos := make([dynamic]vk.AccelerationStructureBuildGeometryInfoKHR, 0, len(infos), context.temp_allocator)
+    range_infos := make([dynamic]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
+    for info in infos {
+        geos := make([dynamic]vk.AccelerationStructureGeometryKHR, context.temp_allocator)
+        for geo in info.geometries {
+            append(&geos, vk.AccelerationStructureGeometryKHR {
+                sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+                pNext = nil,
+                geometryType = geo.type,
+                geometry = geo.geometry,
+                flags = geo.flags
+            })
+        }
+
+        build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
+            sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+            pNext = nil,
+            type = info.type,
+            flags = info.flags,
+            mode = info.mode,
+            srcAccelerationStructure = info.src,
+            dstAccelerationStructure = info.dst,
+            geometryCount = u32(len(geos)),
+            pGeometries = raw_data(geos),
+            ppGeometries = nil,
+            scratchData = info.scratch_data
+        }
+        range_info := vk.AccelerationStructureBuildRangeInfoKHR {
+            primitiveCount = info.range_info.primitiveCount,
+            primitiveOffset = info.range_info.primitiveOffset,
+            firstVertex = info.range_info.firstVertex,
+            transformOffset = info.range_info.transformOffset,
+        }
+        append(&g_infos, build_info)
+        append(&range_infos, range_info)
+    }
+
+    //vk.CmdBuildAccelerationStructuresKHR(cb, u32(len(infos)), raw_data(g_infos), raw_data(range_infos))
+}
 
