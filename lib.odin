@@ -3028,8 +3028,9 @@ cmd_build_acceleration_structures :: proc(
 
     g_infos := make([dynamic]vk.AccelerationStructureBuildGeometryInfoKHR, 0, len(infos), context.temp_allocator)
     range_infos := make([dynamic]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
+    range_info_ptrs := make([dynamic][^]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     for info in infos {
-        geos := make([dynamic]vk.AccelerationStructureGeometryKHR, context.temp_allocator)
+        geos := make([dynamic]vk.AccelerationStructureGeometryKHR, 0, len(info.geometries), context.temp_allocator)
         for geo in info.geometries {
             append(&geos, vk.AccelerationStructureGeometryKHR {
                 sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
@@ -3059,10 +3060,11 @@ cmd_build_acceleration_structures :: proc(
             firstVertex = info.range_info.firstVertex,
             transformOffset = info.range_info.transformOffset,
         }
-        append(&g_infos, build_info)
         append(&range_infos, range_info)
+        append(&g_infos, build_info)
+        append(&range_info_ptrs, raw_data(range_infos))
     }
 
-    //vk.CmdBuildAccelerationStructuresKHR(cb, u32(len(infos)), raw_data(g_infos), raw_data(range_infos))
+    vk.CmdBuildAccelerationStructuresKHR(cb, u32(len(infos)), raw_data(g_infos), raw_data(range_info_ptrs))
 }
 
