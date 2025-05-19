@@ -90,6 +90,7 @@ clear_sync_info :: proc(s: ^Sync_Info) {
 // Distinct handle types for each Handle_Map in the Graphics_Device
 Buffer_Handle :: distinct hm.Handle
 Image_Handle :: distinct hm.Handle
+Acceleration_Structure_Handle :: distinct hm.Handle
 Semaphore_Handle :: distinct hm.Handle
 
 // Megastruct holding basically all Vulkan-specific state
@@ -161,6 +162,7 @@ Graphics_Device :: struct {
     // Handle_Maps of all Vulkan objects
     buffers: hm.Handle_Map(Buffer),
     images: hm.Handle_Map(Image),
+    acceleration_structures: hm.Handle_Map(AccelerationStructure),
     semaphores: hm.Handle_Map(vk.Semaphore),
     pipelines: hm.Handle_Map(vk.Pipeline),
 
@@ -287,10 +289,9 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
     {
         phys_device_count : u32 = 0
         vk.EnumeratePhysicalDevices(gd.instance, &phys_device_count, nil)
-
         phys_devices := make([dynamic]vk.PhysicalDevice, phys_device_count, context.temp_allocator)
         vk.EnumeratePhysicalDevices(gd.instance, &phys_device_count, raw_data(phys_devices))
-        
+
         // Select the physical device to use
         // @NOTE: We only support using a single physical device at once
         features: vk.PhysicalDeviceFeatures2
@@ -455,6 +456,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
         if .Raytracing in params.support_flags {
             append(&extensions, "VK_KHR_deferred_host_operations")
             append(&extensions, vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
+            gd.has_raytracing = true
         }
         
         // Create logical device
@@ -818,6 +820,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
     {
         hm.init(&gd.buffers)
         hm.init(&gd.images)
+        hm.init(&gd.acceleration_structures)
         hm.init(&gd.semaphores)
         hm.init(&gd.pipelines)
     }
@@ -3004,12 +3007,34 @@ create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineI
 
 // Acceleration structure section
 
+AccelerationStructure :: struct {
+    as: vk.AccelerationStructureKHR,
+}
+
+AccelerationStructureCreateInfo :: struct {
+    flags: vk.AccelerationStructureCreateFlagKHR,
+    buffer: Buffer_Handle,
+    offset: vk.DeviceSize,       // Must be multiple of 256
+    size: vk.DeviceSize,
+    type: vk.AccelerationStructureTypeKHR,
+    device_address: vk.DeviceAddress,
+}
+create_acceleration_structure :: proc(
+    gd: ^Graphics_Device,
+    infos: []AccelerationStructureCreateInfo,
+) -> Acceleration_Structure_Handle {
+    out_handle: Acceleration_Structure_Handle
+
+    //vk.CreateAccelerationStructureKHR(gd.device, )
+    return out_handle
+}
+
 AccelerationStructureGeometry :: struct {
     type: vk.GeometryTypeKHR,
     geometry: vk.AccelerationStructureGeometryDataKHR,
     flags: vk.GeometryFlagsKHR
 }
-AccelerationStructureInfo :: struct {
+AccelerationStructureBuildInfo :: struct {
     type: vk.AccelerationStructureTypeKHR,
     flags: vk.BuildAccelerationStructureFlagsKHR,
     mode: vk.BuildAccelerationStructureModeKHR,
@@ -3022,7 +3047,7 @@ AccelerationStructureInfo :: struct {
 
 cmd_build_acceleration_structures :: proc(
     gd: ^Graphics_Device,
-    infos: []AccelerationStructureInfo
+    infos: []AccelerationStructureBuildInfo
 ) {
     cb := gd.gfx_command_buffers[in_flight_idx(gd)]
 
