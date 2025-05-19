@@ -454,6 +454,8 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
             append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
         }
         if .Raytracing in params.support_flags {
+            // @TODO: Actually check for the presence of these extensions
+            // as written this code will just crash on non-RT GPUs
             append(&extensions, "VK_KHR_deferred_host_operations")
             append(&extensions, vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
             gd.has_raytracing = true
