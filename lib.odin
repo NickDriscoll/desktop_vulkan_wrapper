@@ -64,27 +64,27 @@ sync_init :: proc(s: ^Sync_Info) {
     s.signal_ops = make([dynamic]Semaphore_Op)
 }
 
-add_wait_op :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle, value : u64 = 0) {
-    append(&wait_ops, Semaphore_Op {
+add_wait_op :: proc(gd: ^Graphics_Device, i: ^Sync_Info, handle: Semaphore_Handle, value : u64 = 0) {
+    append(&i.wait_ops, Semaphore_Op {
         semaphore = handle,
         value = value
     })
 }
-add_signal_op :: proc(gd: ^Graphics_Device, using i: ^Sync_Info, handle: Semaphore_Handle, value : u64 = 0) {
-    append(&signal_ops, Semaphore_Op {
+add_signal_op :: proc(gd: ^Graphics_Device, i: ^Sync_Info, handle: Semaphore_Handle, value : u64 = 0) {
+    append(&i.signal_ops, Semaphore_Op {
         semaphore = handle,
         value = value
     })
 }
 
-delete_sync_info :: proc(using s: ^Sync_Info) {
-    delete(wait_ops)
-    delete(signal_ops)
+delete_sync_info :: proc(s: ^Sync_Info) {
+    delete(s.wait_ops)
+    delete(s.signal_ops)
 }
 
-clear_sync_info :: proc(using s: ^Sync_Info) {
-    clear(&wait_ops)
-    clear(&signal_ops)
+clear_sync_info :: proc(s: ^Sync_Info) {
+    clear(&s.wait_ops)
+    clear(&s.signal_ops)
 }
 
 // Distinct handle types for each Handle_Map in the Graphics_Device
@@ -1291,17 +1291,17 @@ Pending_Image :: struct {
     src_queue_family: u32
 }
 
-create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> Image_Handle {
+create_image :: proc(gd: ^Graphics_Device, image_info: ^Image_Create) -> Image_Handle {
     // TRANSFER_DST is required for layout transitions period.
     // SAMPLED is required because all images in the system are
     // available in the bindless images array
-    usage += {.SAMPLED,.TRANSFER_DST}
+    image_info.usage += {.SAMPLED,.TRANSFER_DST}
 
     // Calculate mipmap count
     mip_count : u32 = 1
-    if supports_mipmaps {
+    if image_info.supports_mipmaps {
         // Mipmaps are only for 2D images at least rn
-        assert(image_type == .D2)
+        assert(image_info.image_type == .D2)
 
         highest_bit_32 :: proc(n: u32) -> u32 {
             n := n
@@ -1314,7 +1314,7 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
             return i
         }
 
-        max_dim := max(extent.width, extent.height)
+        max_dim := max(image_info.extent.width, image_info.extent.height)
         mip_count = highest_bit_32(max_dim)
     }
 
@@ -1323,22 +1323,22 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
         info := vk.ImageCreateInfo {
             sType = .IMAGE_CREATE_INFO,
             pNext = nil,
-            flags = flags,
-            imageType = image_type,
-            format = format,
-            extent = extent,
+            flags = image_info.flags,
+            imageType = image_info.image_type,
+            format = image_info.format,
+            extent = image_info.extent,
             mipLevels = mip_count,
-            arrayLayers = array_layers,
-            samples = samples,
-            tiling = tiling,
-            usage = usage,
+            arrayLayers = image_info.array_layers,
+            samples = image_info.samples,
+            tiling = image_info.tiling,
+            usage = image_info.usage,
             sharingMode = .EXCLUSIVE,
             queueFamilyIndexCount = 1,
             pQueueFamilyIndices = &gd.gfx_queue_family,
             initialLayout = .UNDEFINED
         }
         alloc_info := vma.Allocation_Create_Info {
-            flags = alloc_flags,
+            flags = image_info.alloc_flags,
             usage = .Auto,
             required_flags = {.DEVICE_LOCAL},
             preferred_flags = nil,
@@ -1355,19 +1355,19 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
             log.error("Failed to create image.")
         }
     }
-    image.extent = extent
+    image.extent = image_info.extent
 
     // Create the image view
     {
         view_type: vk.ImageViewType
-        switch image_type {
+        switch image_info.image_type {
             case .D1: view_type = .D1
             case .D2: view_type = .D2
             case .D3: view_type = .D3
         }
 
         aspect_mask : vk.ImageAspectFlags = {.COLOR}
-        if format == .D32_SFLOAT {
+        if image_info.format == .D32_SFLOAT {
             aspect_mask = {.DEPTH}
         }
 
@@ -1376,7 +1376,7 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
             baseMipLevel = 0,
             levelCount = u32(mip_count),
             baseArrayLayer = 0,
-            layerCount = array_layers
+            layerCount = image_info.array_layers
         }
 
         info := vk.ImageViewCreateInfo {
@@ -1385,7 +1385,7 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
             flags = nil,
             image = image.image,
             viewType = view_type,
-            format = format,
+            format = image_info.format,
             components = IDENTITY_COMPONENT_SWIZZLE,
             subresourceRange = subresource_range
         }
@@ -1395,7 +1395,7 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
     }
 
     // Set debug names
-    if len(name) > 0 {
+    if len(image_info.name) > 0 {
         sb: strings.Builder
         strings.builder_init(&sb, allocator = context.temp_allocator)
         image_name := fmt.sbprintf(&sb, "%v image", image_info.name)
@@ -1412,7 +1412,7 @@ create_image :: proc(gd: ^Graphics_Device, using image_info: ^Image_Create) -> I
     return Image_Handle(hm.insert(&gd.images, image))
 }
 
-new_bindless_image :: proc(gd: ^Graphics_Device, using info: ^Image_Create, layout: vk.ImageLayout) -> Image_Handle {
+new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk.ImageLayout) -> Image_Handle {
     handle := create_image(gd, info)
     image, ok := hm.get(&gd.images, hm.Handle(handle))
     if !ok {
@@ -1420,7 +1420,7 @@ new_bindless_image :: proc(gd: ^Graphics_Device, using info: ^Image_Create, layo
     }
 
     aspect_mask : vk.ImageAspectFlags = {.COLOR}
-    if format == .D32_SFLOAT {
+    if info.format == .D32_SFLOAT {
         aspect_mask = {.DEPTH}
     }
 
