@@ -87,6 +87,11 @@ clear_sync_info :: proc(s: ^Sync_Info) {
     clear(&s.signal_ops)
 }
 
+SupportFlags :: bit_set[enum {
+    Window,              // Will this device need to draw to window surface swapchains?
+    Raytracing,          // Will this device need raytracing capabilities?
+}]
+
 // Distinct handle types for each Handle_Map in the Graphics_Device
 Buffer_Handle :: distinct hm.Handle
 Image_Handle :: distinct hm.Handle
@@ -103,7 +108,8 @@ Graphics_Device :: struct {
     pipeline_cache: vk.PipelineCache,       // @TODO: Actually use pipeline cache
     alloc_callbacks: ^vk.AllocationCallbacks,
     allocator: vma.Allocator,
-    has_raytracing: bool,
+
+    support_flags: SupportFlags,
 
     frames_in_flight: u32,
     frame_count: u64,
@@ -117,7 +123,7 @@ Graphics_Device :: struct {
     acquire_semaphores: [dynamic]Semaphore_Handle,
     present_semaphores: [dynamic]Semaphore_Handle,
     resize_window: bool,
-    
+
     // The Vulkan queues that the device will submit on
     // May be aliases of each other if the GPU doesn't have
     // e.g. an async compute queue or dedicated transfer queue
@@ -127,7 +133,7 @@ Graphics_Device :: struct {
     gfx_queue: vk.Queue,
     compute_queue: vk.Queue,
     transfer_queue: vk.Queue,
-    
+
     // Command buffer related state
     gfx_command_pool: vk.CommandPool,
     compute_command_pool: vk.CommandPool,
@@ -158,7 +164,7 @@ Graphics_Device :: struct {
     // Pipeline layouts used for all pipelines
     gfx_pipeline_layout: vk.PipelineLayout,
     compute_pipeline_layout: vk.PipelineLayout,
-    
+
     // Handle_Maps of all Vulkan objects
     buffers: hm.Handle_Map(Buffer),
     images: hm.Handle_Map(Image),
@@ -173,7 +179,7 @@ Graphics_Device :: struct {
     // Deletion queues for Buffers and Images
     buffer_deletes: queue.Queue(Buffer_Delete),
     image_deletes: queue.Queue(Image_Delete),
-    
+
 }
 
 // @TODO: What am I doing with this?
@@ -191,11 +197,6 @@ string_from_bytes :: proc(bytes: []u8) -> string {
     return strings.string_from_null_terminated_ptr(&bytes[0], len(bytes))
 }
 
-SupportFlags :: bit_set[enum {
-    Window,              // Will this device need to draw to window surface swapchains?
-    Raytracing,          // Will this device need raytracing capabilities?
-}]
-
 Init_Parameters :: struct {
     // Vulkan instance creation parameters
     app_name: cstring,
@@ -211,8 +212,22 @@ Init_Parameters :: struct {
     support_flags: SupportFlags
 }
 
-init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
+init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
     assert(params.frames_in_flight > 0)
+
+    comp_bytes_to_string :: proc(bytes: []byte, s: string) -> bool {
+        return string(bytes[0:len(s)]) == s
+    }
+
+    string_contained :: proc(list: []vk.ExtensionProperties, cand: string) -> bool {
+        for ext in list {
+            name := ext.extensionName
+            if comp_bytes_to_string(name[:], cand) {
+                return true
+            }
+        }
+        return false
+    }
 
     gd: Graphics_Device
     gd.frames_in_flight = params.frames_in_flight
@@ -232,19 +247,33 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
         // Instead of forcing the caller to explicitly provide
         // the extensions they want to enable, I want to provide high-level
         // idioms that cover many extensions in the same logical category
-        
-        extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
+
+        ext_count: u32 
+        vk.EnumerateInstanceExtensionProperties(nil, &ext_count, nil)
+        supported_extensions := make([dynamic]vk.ExtensionProperties, ext_count, context.temp_allocator)
+        vk.EnumerateInstanceExtensionProperties(nil, &ext_count, raw_data(supported_extensions))
+        log.debugf("Supported instance extensions: %v", supported_extensions)
+
+        final_extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
         if .Window in params.support_flags {
-            append(&extensions, vk.KHR_SURFACE_EXTENSION_NAME)
+            exts: []string
             when ODIN_OS == .Windows {
-                append(&extensions, vk.KHR_WIN32_SURFACE_EXTENSION_NAME)
+                exts = {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_WIN32_SURFACE_EXTENSION_NAME}
             }
             when ODIN_OS == .Linux {
-                append(&extensions, vk.KHR_XLIB_SURFACE_EXTENSION_NAME)
+                exts = {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_XLIB_SURFACE_EXTENSION_NAME}
+            }
+
+            for ext in exts {
+                if string_contained(supported_extensions[:], ext) {
+                    append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
+                } else {
+                    log.errorf("Required instance extension %v not found.", ext)
+                }
             }
         }
 
-        append(&extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+        append(&final_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
         debug_info := vk.DebugUtilsMessengerCreateInfoEXT {
             sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
             pNext = nil,
@@ -254,7 +283,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
             pfnUserCallback = debug_utils_callback,
             pUserData = nil
         }
-        
+
         app_info := vk.ApplicationInfo {
             sType = .APPLICATION_INFO,
             pNext = nil,
@@ -271,10 +300,10 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
             pApplicationInfo = &app_info,
             enabledLayerCount = 0,
             ppEnabledLayerNames = nil,
-            enabledExtensionCount = u32(len(extensions)),
-            ppEnabledExtensionNames = raw_data(extensions)
+            enabledExtensionCount = u32(len(final_extensions)),
+            ppEnabledExtensionNames = raw_data(final_extensions)
         }
-        
+
         r := vk.CreateInstance(&create_info, params.allocation_callbacks, &gd.instance)
         if r != .SUCCESS {
             log.error("Instance creation failed.")
@@ -305,7 +334,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
 
             props.pNext = &vk12_props
             vk.GetPhysicalDeviceProperties2(pd, &props)
-            
+
             log.debugf("Considering physical device:\n%v", string_from_bytes(props.properties.deviceName[:]))
 
             // @TODO: Do something more sophisticated than picking the first DISCRETE_GPU
@@ -360,39 +389,6 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
         vk.GetPhysicalDeviceQueueFamilyProperties2(gd.physical_device, &queue_family_count, raw_data(qfps))
 
-        //Load all supported device extensions for later querying
-        extension_count : u32 = 0
-        vk.EnumerateDeviceExtensionProperties(gd.physical_device, nil, &extension_count, nil)
-
-        device_extensions := make([dynamic]vk.ExtensionProperties, extension_count, context.temp_allocator)
-        vk.EnumerateDeviceExtensionProperties(gd.physical_device, nil, &extension_count, raw_data(device_extensions))
-
-        // Query for extension support,
-        // namely Sync2 and dynamic rendering support for now
-        comp_bytes_to_string :: proc(bytes: []byte, s: string) -> bool {
-            return string(bytes[0:len(s)]) == s
-        }
-        
-        necessary_extensions: []string = {
-            vk.EXT_MEMORY_BUDGET_EXTENSION_NAME
-        }
-
-        extension_flags: bit_set[0..<4] = {}
-        for ext in device_extensions {
-            name := ext.extensionName
-            for ext_string, i in necessary_extensions {
-                if comp_bytes_to_string(name[:], ext_string) {
-                    extension_flags += {i}
-                    log.debugf("%s verified", name)
-                }
-            }
-        }
-        for s, i in necessary_extensions {
-            if i not_in extension_flags {
-                log.errorf("Your device does not support %v. Buh bye.", s)
-            }
-        }
-
         // Determine available queue family types
         for qfp, i in qfps {
             flags := qfp.queueFamilyProperties.queueFlags
@@ -404,7 +400,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
         for qfp, i in qfps {
             flags := qfp.queueFamilyProperties.queueFlags
             log.debugf("%#v", qfp.queueFamilyProperties.queueFlags)
-            
+
             if .COMPUTE&.TRANSFER in flags {
                 gd.compute_queue_family = u32(i)
                 gd.transfer_queue_family = u32(i)
@@ -448,19 +444,47 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
 
         // Device extensions
-        extensions := make([dynamic]cstring, 0, 4, context.temp_allocator)
-        append(&extensions, vk.EXT_MEMORY_BUDGET_EXTENSION_NAME)
+
+        //Load all supported device extensions for later querying
+        extension_count : u32 = 0
+        vk.EnumerateDeviceExtensionProperties(gd.physical_device, nil, &extension_count, nil)
+        supported_extensions := make([dynamic]vk.ExtensionProperties, extension_count, context.temp_allocator)
+        vk.EnumerateDeviceExtensionProperties(gd.physical_device, nil, &extension_count, raw_data(supported_extensions))
+
+        required_extensions: []string = {
+            vk.EXT_MEMORY_BUDGET_EXTENSION_NAME
+        }
+
+        final_extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
+        for ext in required_extensions {
+            if !string_contained(supported_extensions[:], ext) {
+                log.errorf("Device doesn't have required extension: %v", ext)
+                return gd, .ERROR_EXTENSION_NOT_PRESENT
+            }
+            append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
+        }
         if .Window in params.support_flags {
-            append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+            gd.support_flags += {.Window}
+            if string_contained(supported_extensions[:], vk.KHR_SWAPCHAIN_EXTENSION_NAME) {
+                append(&final_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+            } else {
+                log.errorf("Requested window support but %v was not found", vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+                gd.support_flags -= {.Window}
+            }
         }
         if .Raytracing in params.support_flags {
-            // @TODO: Actually check for the presence of these extensions
-            // as written this code will just crash on non-RT GPUs
-            append(&extensions, "VK_KHR_deferred_host_operations")
-            append(&extensions, vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
-            gd.has_raytracing = true
+            gd.support_flags += {.Raytracing}
+            rt_exts : []string = { "VK_KHR_deferred_host_operations", vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME }
+            for ext in rt_exts {
+                if string_contained(supported_extensions[:], ext) {
+                    append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
+                } else {
+                    log.errorf("Requested raytracing support but %v was not found", ext)
+                    gd.support_flags -= {.Raytracing}
+                }
+            }
         }
-        
+
         // Create logical device
         create_info := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
@@ -468,12 +492,12 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
             flags = nil,
             queueCreateInfoCount = queue_count,
             pQueueCreateInfos = raw_data(&queue_create_infos),
-            enabledExtensionCount = u32(len(extensions)),
-            ppEnabledExtensionNames = raw_data(extensions),
+            enabledExtensionCount = u32(len(final_extensions)),
+            ppEnabledExtensionNames = raw_data(final_extensions),
             ppEnabledLayerNames = nil,
             pEnabledFeatures = nil
         }
-        
+
         r := vk.CreateDevice(gd.physical_device, &create_info, params.allocation_callbacks, &gd.device)
         if r != .SUCCESS {
             log.error("Failed to create device.")
@@ -566,7 +590,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
             log.error("Failed to create gfx command pool")
         }
         assign_debug_name(gd.device, .COMMAND_POOL, u64(gd.gfx_command_pool), "GFX Command Pool")
-        
+
         compute_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
             pNext = nil,
@@ -577,7 +601,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
             log.error("Failed to create compute command pool")
         }
         assign_debug_name(gd.device, .COMMAND_POOL, u64(gd.compute_command_pool), "Compute Command Pool")
-        
+
         transfer_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
             pNext = nil,
@@ -856,7 +880,7 @@ init_vulkan :: proc(params: ^Init_Parameters) -> (Graphics_Device, vk.Result) {
         gd.transfer_timeline = create_semaphore(&gd, &info)
     }
 
-    return gd, nil
+    return gd, .SUCCESS
 }
 
 quit_vulkan :: proc(gd: ^Graphics_Device) {
@@ -1155,7 +1179,7 @@ sync_write_buffer :: proc(
     semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
     in_bytes : []byte = slice.from_ptr(cast([^]byte)slice.as_ptr(in_slice), len(in_slice) * size_of(Element_Type))
     base_offset_bytes := base_offset * size_of(Element_Type)
-    
+
     total_bytes := len(in_bytes)
     bytes_transferred := 0
 
@@ -1168,14 +1192,14 @@ sync_write_buffer :: proc(
         // Staging buffer
         sb := get_buffer(gd, gd.staging_buffer) or_return
         sb_ptr := sb.alloc_info.mapped_data
-    
+
         for bytes_transferred < total_bytes {
             iter_size := min(total_bytes - bytes_transferred, STAGING_BUFFER_SIZE)
-            
+
             // Copy to staging buffer
             p := &in_bytes[bytes_transferred]
             mem.copy(sb_ptr, p, iter_size)
-    
+
             // Begin transfer command buffer
             begin_info := vk.CommandBufferBeginInfo {
                 sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -1184,7 +1208,7 @@ sync_write_buffer :: proc(
                 pInheritanceInfo = nil
             }
             vk.BeginCommandBuffer(cb, &begin_info)
-    
+
             // Copy from staging buffer to actual buffer
             buffer_copy := vk.BufferCopy {
                 srcOffset = 0,
@@ -1193,7 +1217,7 @@ sync_write_buffer :: proc(
             }
             vk.CmdCopyBuffer(cb, sb.buffer, out_buf.buffer, 1, &buffer_copy)
             vk.EndCommandBuffer(cb)
-    
+
             // Actually submit this lonesome command to the transfer queue
             cb_info := vk.CommandBufferSubmitInfo {
                 sType = .COMMAND_BUFFER_SUBMIT_INFO,
@@ -1201,7 +1225,7 @@ sync_write_buffer :: proc(
                 commandBuffer = cb,
                 deviceMask = 0
             }
-    
+
             // Increment transfer timeline counter
             new_timeline_value := gd.transfers_completed + 1
             signal_info := vk.SemaphoreSubmitInfo {
@@ -1212,7 +1236,7 @@ sync_write_buffer :: proc(
                 stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
                 deviceIndex = 0
             }
-    
+
             submit_info := vk.SubmitInfo2 {
                 sType = .SUBMIT_INFO_2,
                 pNext = nil,
@@ -1225,7 +1249,7 @@ sync_write_buffer :: proc(
             if vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
                 log.error("Failed to submit to transfer queue.")
             }
-    
+
             // CPU wait
             wait_info := vk.SemaphoreWaitInfo {
                 sType = .SEMAPHORE_WAIT_INFO,
@@ -1238,12 +1262,12 @@ sync_write_buffer :: proc(
             if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
                 log.error("Failed to wait for transfer semaphore.")
             }
-    
+
             gd.transfers_completed += 1
             bytes_transferred += iter_size
         }
     }
-    
+
 
     return true
 }
@@ -1437,7 +1461,7 @@ new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk
         src_queue_family = gd.gfx_queue_family
     })
 
-    
+
 
     // Record queue family ownership transfer
     // @TODO: Barrier is overly opinionated about future usage
@@ -1736,7 +1760,7 @@ delete_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> bool {
     }
     queue.append(&gd.image_deletes, image_delete)
     hm.remove(&gd.images, hm.Handle(handle))
-    
+
     return true
 }
 
@@ -1747,7 +1771,7 @@ acquire_swapchain_image :: proc(
 ) -> (image_idx: u32, ok: bool) {
     idx := in_flight_idx(gd)
     sem := get_semaphore(gd, gd.acquire_semaphores[idx]) or_return
-    
+
     out_image_idx: u32
     if vk.AcquireNextImageKHR(gd.device, gd.swapchain, max(u64), sem^, 0, &out_image_idx) != .SUCCESS {
         log.error("Failed to acquire swapchain image")
@@ -1755,12 +1779,12 @@ acquire_swapchain_image :: proc(
     }
 
     // Define execution and memory dependencies surrounding swapchain image acquire
-    
+
     // Wait on swapchain image acquire semaphore
     // and signal when we're done drawing on a different semaphore
     add_wait_op(gd, sync, gd.acquire_semaphores[in_flight_idx(gd)])
     add_signal_op(gd, sync, gd.present_semaphores[out_image_idx])
-    
+
     swapchain_image_handle := gd.swapchain_images[out_image_idx]
 
     // Memory barrier between swapchain acquire and rendering
@@ -1825,7 +1849,7 @@ begin_compute_command_buffer :: proc(
     if gd.frame_count >= u64(gd.frames_in_flight) {
         // Wait on timeline semaphore before starting command buffer execution
         wait_value := gd.frame_count - u64(gd.frames_in_flight) + 1
-        
+
         // CPU-sync to prevent CPU from getting further ahead than
         // the number of frames in flight
         sem, ok := get_semaphore(gd, timeline_semaphore)
@@ -1865,13 +1889,13 @@ begin_gfx_command_buffer :: proc(
     gd: ^Graphics_Device,
     timeline_semaphore: Semaphore_Handle
 ) -> CommandBuffer_Index {
-    
-    
+
+
     // Sync point where we wait if there are already N frames in the gfx queue
     if gd.frame_count >= u64(gd.frames_in_flight) {
         // Wait on timeline semaphore before starting command buffer execution
         wait_value := gd.frame_count - u64(gd.frames_in_flight) + 1
-        
+
         // CPU-sync to prevent CPU from getting further ahead than
         // the number of frames in flight
         sem, ok := get_semaphore(gd, timeline_semaphore)
@@ -1934,7 +1958,7 @@ begin_gfx_command_buffer :: proc(
                     log.errorf("Couldn't get pending image from handle %v", pending_image.handle)
                     continue
                 }
-                
+
                 barriers := []Image_Barrier {
                     {
                         src_stage_mask = {.ALL_COMMANDS},                       // Ignored in acquire operation
@@ -2067,7 +2091,7 @@ submit_gfx_command_buffer :: proc(
     // Make semaphore submit infos
     wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.wait_ops), allocator = context.temp_allocator)
     signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.signal_ops), allocator = context.temp_allocator)
-    
+
     build_submit_infos(gd, &wait_infos, &sync.wait_ops)
     build_submit_infos(gd, &signal_infos, &sync.signal_ops)
 
@@ -2118,7 +2142,7 @@ submit_gfx_and_present :: proc(
 
     submit_gfx_command_buffer(gd, cb_idx, sync)
     present_swapchain_image(gd, swapchain_idx)
-            
+
     gd.frame_count += 1
 }
 
@@ -2380,7 +2404,7 @@ get_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> (^vk.Se
 destroy_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> bool {
     semaphore := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
     vk.DestroySemaphore(gd.device, semaphore^, gd.alloc_callbacks)
-    
+
     return true
 }
 
@@ -2485,7 +2509,7 @@ cmd_compute_pipeline_barriers :: proc(
             size = barrier.size,
         })
     }
-    
+
     im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(buffer_barriers), allocator = context.temp_allocator)
     for barrier in image_barriers {
         using barrier
@@ -2734,7 +2758,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
     // One dynamic array for each thing in Graphics_Pipeline_Info
     pipelines := make([dynamic]vk.Pipeline, pipeline_count, context.temp_allocator)
     create_infos := make([dynamic]vk.GraphicsPipelineCreateInfo, pipeline_count, context.temp_allocator)
-    
+
     shader_modules := make([dynamic]vk.ShaderModule, 2 * pipeline_count, context.temp_allocator)
     defer for module in shader_modules {
         vk.DestroyShaderModule(gd.device, module, gd.alloc_callbacks)
@@ -2750,9 +2774,9 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
     colorblend_attachments := make([dynamic]vk.PipelineColorBlendAttachmentState, pipeline_count, context.temp_allocator)
     colorblend_states := make([dynamic]vk.PipelineColorBlendStateCreateInfo, pipeline_count, context.temp_allocator)
     renderpass_states := make([dynamic]vk.PipelineRenderingCreateInfo, pipeline_count, context.temp_allocator)
-    
+
     dynamic_states : [2]vk.DynamicState = {.VIEWPORT,.SCISSOR}
-    
+
     // Constant pipeline create infos
     vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
         sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
