@@ -344,13 +344,16 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 vulkan_12_features: vk.PhysicalDeviceVulkan12Features
                 dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures
                 sync2_features: vk.PhysicalDeviceSynchronization2Features
+                accel_features: vk.PhysicalDeviceAccelerationStructureFeaturesKHR
 
                 vulkan_11_features.sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES
                 vulkan_12_features.sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
                 dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
                 sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
+                accel_features.sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR
                 features.sType = .PHYSICAL_DEVICE_FEATURES_2
 
+                vulkan_11_features.pNext = &accel_features
                 vulkan_12_features.pNext = &vulkan_11_features
                 dynamic_rendering_features.pNext = &vulkan_12_features
                 sync2_features.pNext = &dynamic_rendering_features
@@ -358,9 +361,17 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 vk.GetPhysicalDeviceFeatures2(pd, &features)
 
                 // Check for raytracing features
-                //if 
+                has_right_features : b32 = true
+                if .Raytracing in params.support_flags {
+                    has_right_features = accel_features.accelerationStructure &&
+                                         accel_features.descriptorBindingAccelerationStructureUpdateAfterBind
 
-                has_right_features :=
+                    if !has_right_features {
+                        gd.support_flags -= {.Raytracing}
+                    }
+                }
+
+                has_right_features =
                     vulkan_11_features.variablePointers &&
                     vulkan_12_features.descriptorIndexing &&
                     vulkan_12_features.runtimeDescriptorArray &&
@@ -2747,7 +2758,6 @@ GraphicsPipelineInfo :: struct {
     name: string,
 }
 
-// @TODO: temp allocator
 create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelineInfo) -> [dynamic]Pipeline_Handle {
     pipeline_count := len(infos)
 
@@ -3038,7 +3048,7 @@ AccelerationStructure :: struct {
 }
 
 AccelerationStructureCreateInfo :: struct {
-    flags: vk.AccelerationStructureCreateFlagKHR,
+    flags: vk.AccelerationStructureCreateFlagsKHR,
     buffer: Buffer_Handle,
     offset: vk.DeviceSize,       // Must be multiple of 256
     size: vk.DeviceSize,
@@ -3047,12 +3057,26 @@ AccelerationStructureCreateInfo :: struct {
 }
 create_acceleration_structure :: proc(
     gd: ^Graphics_Device,
-    infos: []AccelerationStructureCreateInfo,
+    info: AccelerationStructureCreateInfo,
 ) -> Acceleration_Structure_Handle {
-    out_handle: Acceleration_Structure_Handle
+    new_as: AccelerationStructure
 
-    //vk.CreateAccelerationStructureKHR(gd.device, )
-    return out_handle
+    as_buffer, _ := get_buffer(gd, info.buffer)
+    info := vk.AccelerationStructureCreateInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        pNext = nil,
+        createFlags = info.flags,
+        buffer = as_buffer.buffer,
+        offset = info.offset,
+        size = info.size,
+        type = info.type,
+        deviceAddress = info.device_address
+    }
+    res := vk.CreateAccelerationStructureKHR(gd.device, &info, gd.alloc_callbacks, &new_as.as)
+    if res != .SUCCESS {
+        log.errorf("Failed to create acceleration structure: %v", res)
+    }
+    return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, new_as))
 }
 
 AccelerationStructureGeometry :: struct {
