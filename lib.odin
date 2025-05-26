@@ -3091,8 +3091,46 @@ AccelerationStructureBuildInfo :: struct {
     src: vk.AccelerationStructureKHR,
     dst: vk.AccelerationStructureKHR,
     geometries: []AccelerationStructureGeometry,
+    prim_counts: []u32,
     scratch_data: vk.DeviceOrHostAddressKHR,
     range_info: vk.AccelerationStructureBuildRangeInfoKHR,
+}
+
+get_acceleration_structure_build_sizes :: proc(
+    gd: ^Graphics_Device,
+    info: AccelerationStructureBuildInfo
+) -> vk.AccelerationStructureBuildSizesInfoKHR {
+    size_info: vk.AccelerationStructureBuildSizesInfoKHR
+    size_info.sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
+
+    geos := make([dynamic]vk.AccelerationStructureGeometryKHR, 0, len(info.geometries), context.temp_allocator)
+    for geo in info.geometries {
+        append(&geos, vk.AccelerationStructureGeometryKHR {
+            sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+            pNext = nil,
+            geometryType = geo.type,
+            geometry = geo.geometry,
+            flags = geo.flags
+        })
+    }
+
+    build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        pNext = nil,
+        type = info.type,
+        flags = info.flags,
+        mode = info.mode,
+        srcAccelerationStructure = info.src,
+        dstAccelerationStructure = info.dst,
+        geometryCount = u32(len(geos)),
+        pGeometries = raw_data(geos),
+        ppGeometries = nil,
+        scratchData = info.scratch_data
+    }
+    // @NOTE: A little birdy told me to never use host AS building
+    vk.GetAccelerationStructureBuildSizesKHR(gd.device, .DEVICE, &build_info, raw_data(info.prim_counts), &size_info)
+
+    return size_info
 }
 
 cmd_build_acceleration_structures :: proc(
