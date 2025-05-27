@@ -3046,7 +3046,6 @@ create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineI
 AccelerationStructure :: struct {
     as: vk.AccelerationStructureKHR,
 }
-
 AccelerationStructureCreateInfo :: struct {
     flags: vk.AccelerationStructureCreateFlagsKHR,
     buffer: Buffer_Handle,
@@ -3055,6 +3054,36 @@ AccelerationStructureCreateInfo :: struct {
     type: vk.AccelerationStructureTypeKHR,
     device_address: vk.DeviceAddress,
 }
+
+ASTriangleData :: struct {
+    vertex_format:  vk.Format,
+	vertex_data:    vk.DeviceOrHostAddressConstKHR,
+	vertex_stride:  vk.DeviceSize,
+	max_vertex:     u32,
+	index_type:     vk.IndexType,
+	index_data:     vk.DeviceOrHostAddressConstKHR,
+	transform_data: vk.DeviceOrHostAddressConstKHR,
+}
+AccelerationStructureGeometryData :: union {
+    ASTriangleData,
+}
+AccelerationStructureGeometry :: struct {
+    type: vk.GeometryTypeKHR,
+    geometry: AccelerationStructureGeometryData,
+    flags: vk.GeometryFlagsKHR
+}
+AccelerationStructureBuildInfo :: struct {
+    type: vk.AccelerationStructureTypeKHR,
+    flags: vk.BuildAccelerationStructureFlagsKHR,
+    mode: vk.BuildAccelerationStructureModeKHR,
+    src: vk.AccelerationStructureKHR,
+    dst: vk.AccelerationStructureKHR,
+    geometries: []AccelerationStructureGeometry,
+    prim_counts: []u32,
+    scratch_data: vk.DeviceOrHostAddressKHR,
+    range_info: vk.AccelerationStructureBuildRangeInfoKHR,
+}
+
 create_acceleration_structure :: proc(
     gd: ^Graphics_Device,
     info: AccelerationStructureCreateInfo,
@@ -3078,24 +3107,6 @@ create_acceleration_structure :: proc(
     }
     return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, new_as))
 }
-
-AccelerationStructureGeometry :: struct {
-    type: vk.GeometryTypeKHR,
-    geometry: vk.AccelerationStructureGeometryDataKHR,
-    flags: vk.GeometryFlagsKHR
-}
-AccelerationStructureBuildInfo :: struct {
-    type: vk.AccelerationStructureTypeKHR,
-    flags: vk.BuildAccelerationStructureFlagsKHR,
-    mode: vk.BuildAccelerationStructureModeKHR,
-    src: vk.AccelerationStructureKHR,
-    dst: vk.AccelerationStructureKHR,
-    geometries: []AccelerationStructureGeometry,
-    prim_counts: []u32,
-    scratch_data: vk.DeviceOrHostAddressKHR,
-    range_info: vk.AccelerationStructureBuildRangeInfoKHR,
-}
-
 get_acceleration_structure_build_sizes :: proc(
     gd: ^Graphics_Device,
     info: AccelerationStructureBuildInfo
@@ -3105,11 +3116,26 @@ get_acceleration_structure_build_sizes :: proc(
 
     geos := make([dynamic]vk.AccelerationStructureGeometryKHR, 0, len(info.geometries), context.temp_allocator)
     for geo in info.geometries {
+        geo_data: vk.AccelerationStructureGeometryDataKHR
+        switch d in geo.geometry {
+            case ASTriangleData: {
+                geo_data.triangles = vk.AccelerationStructureGeometryTrianglesDataKHR {
+                    vertexFormat = d.vertex_format,
+                    vertexData = d.vertex_data,
+                    vertexStride = d.vertex_stride,
+                    maxVertex = d.max_vertex,
+                    indexType = d.index_type,
+                    indexData = d.index_data,
+                    transformData = d.transform_data
+                }
+            }
+        }
+
         append(&geos, vk.AccelerationStructureGeometryKHR {
             sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
             pNext = nil,
             geometryType = geo.type,
-            geometry = geo.geometry,
+            geometry = geo_data,
             flags = geo.flags
         })
     }
@@ -3145,11 +3171,25 @@ cmd_build_acceleration_structures :: proc(
     for info in infos {
         geos := make([dynamic]vk.AccelerationStructureGeometryKHR, 0, len(info.geometries), context.temp_allocator)
         for geo in info.geometries {
+            geo_data: vk.AccelerationStructureGeometryDataKHR
+            switch d in geo.geometry {
+                case ASTriangleData: {
+                    geo_data.triangles = vk.AccelerationStructureGeometryTrianglesDataKHR {
+                        vertexFormat = d.vertex_format,
+                        vertexData = d.vertex_data,
+                        vertexStride = d.vertex_stride,
+                        maxVertex = d.max_vertex,
+                        indexType = d.index_type,
+                        indexData = d.index_data,
+                        transformData = d.transform_data
+                    }
+                }
+            }
             append(&geos, vk.AccelerationStructureGeometryKHR {
                 sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
                 pNext = nil,
                 geometryType = geo.type,
-                geometry = geo.geometry,
+                geometry = geo_data,
                 flags = geo.flags
             })
         }
