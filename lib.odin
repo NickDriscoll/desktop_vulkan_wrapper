@@ -570,7 +570,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
     }
 
-    // Cache individual queues
+    // Cache individual device queues
     // We only use one queue from each family
     {
         vk.GetDeviceQueue(gd.device, gd.gfx_queue_family, 0, &gd.gfx_queue)
@@ -733,7 +733,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             })
 
             debug_names : [Immutable_Sampler_Index]cstring = {
-                .Aniso16 = "Aniso 16 Sampler",
+                .Aniso16 = "Anisotropic filtering 16x Sampler",
                 .Point = "Point Sampler",
                 .PostFX = "PostFX Sampler",
             }
@@ -889,6 +889,44 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             name = "Transfer timeline"
         }
         gd.transfer_timeline = create_semaphore(&gd, &info)
+    }
+
+    // Put null texture in slot 0
+    {
+        // Make black and purple texture
+        size :: 16
+        tex_data: [size*size*4]u8
+        for i := 0; i < len(tex_data); i += 4 {
+            pixel_idx := i/4
+            is_odd : int = (pixel_idx / 16) % 2 == 1
+            result: u8 = 0xFF if (pixel_idx) % 2 == is_odd else 0x00
+            tex_data[i] = result
+            tex_data[i + 1] = 0x0
+            tex_data[i + 2] = result
+            tex_data[i + 3] = 0xFF
+        }
+        
+        info := Image_Create {
+            flags = nil,
+            image_type = .D2,
+            format = .R8G8B8A8_UNORM,
+            extent = {
+                width = size,
+                height = size,
+                depth = 1
+            },
+            supports_mipmaps = false,
+            array_layers = 1,
+            samples = {._1},
+            tiling = .OPTIMAL,
+            usage = {.SAMPLED},
+            alloc_flags = nil,
+            name = "Null image"
+        }
+        handle, ok := sync_create_image_with_data(&gd, &info, tex_data[:])
+        if !ok {
+            log.error("Error creating null texture")
+        }
     }
 
     return gd, .SUCCESS
