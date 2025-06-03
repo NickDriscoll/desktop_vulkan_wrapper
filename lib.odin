@@ -1366,7 +1366,20 @@ Pending_Image :: struct {
     old_layout: vk.ImageLayout,
     new_layout: vk.ImageLayout,
     aspect_mask: vk.ImageAspectFlags,
-    src_queue_family: u32
+    src_queue_family: u32,
+    array_layers: u32,
+}
+
+vk_format_pixel_size :: proc(format: vk.Format) -> int {
+    #partial switch format {
+        case .R8G8B8A8_UNORM: return 4
+        case .R8G8B8A8_SRGB: return 4
+        case .BC7_SRGB_BLOCK: return 1 //each 128-bit compressed texel block encodes a 4×4 rectangle
+        case: {
+            log.errorf("Tried to get byte size of unsupported pixel format: %v", format)
+        }
+    }
+    return 0
 }
 
 create_image :: proc(gd: ^Graphics_Device, image_info: ^Image_Create) -> Image_Handle {
@@ -1437,11 +1450,16 @@ create_image :: proc(gd: ^Graphics_Device, image_info: ^Image_Create) -> Image_H
 
     // Create the image view
     {
+        // If image_info.flags contains .CUBE_COMPATIBLE then we know we're making a cubemap
         view_type: vk.ImageViewType
-        switch image_info.image_type {
-            case .D1: view_type = .D1
-            case .D2: view_type = .D2
-            case .D3: view_type = .D3
+        if .CUBE_COMPATIBLE in image_info.flags {
+            view_type = .CUBE
+        } else {
+            switch image_info.image_type {
+                case .D1: view_type = .D1
+                case .D2: view_type = .D2
+                case .D3: view_type = .D3
+            }
         }
 
         aspect_mask : vk.ImageAspectFlags = {.COLOR}
@@ -1507,7 +1525,8 @@ new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk
         old_layout = .UNDEFINED,
         new_layout = layout,
         aspect_mask = aspect_mask,
-        src_queue_family = gd.gfx_queue_family
+        src_queue_family = gd.gfx_queue_family,
+        array_layers = info.array_layers,
     })
 
 
@@ -1543,7 +1562,7 @@ new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk
                 baseMipLevel = 0,
                 levelCount = 1,
                 baseArrayLayer = 0,
-                layerCount = 1
+                layerCount = info.array_layers
             }
         }
     }
@@ -1631,6 +1650,24 @@ sync_create_image_with_data :: proc(
     sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     sb_ptr := sb.alloc_info.mapped_data
 
+    // CHANGE IN SOPHISTICATION!
+    // Instead of assuming that bytes contains exactly one image
+    // with no mips, actually loop over the known number of mips and layers
+    // in order to correctly interpret the raw data
+
+    for i in 0..<create_info.array_layers {
+        // For each image in the array...
+
+        // Determine the size in bytes of an individual image
+        bytes_per_pixel := vk_format_pixel_size(create_info.format)
+        bytes_per_image := u32(bytes_per_pixel) *
+                           create_info.extent.width *
+                           create_info.extent.height *
+                           create_info.extent.depth
+
+        
+    }
+
     bytes_size := len(bytes)
     assert(bytes_size <= STAGING_BUFFER_SIZE, "Image too big for staging buffer. Nick, stop being lazy.")
     amount_transferred := 0
@@ -1670,7 +1707,7 @@ sync_create_image_with_data :: proc(
                         baseMipLevel = 0,
                         levelCount = 1,
                         baseArrayLayer = 0,
-                        layerCount = 1
+                        layerCount = create_info.array_layers
                     }
                 }
             }
@@ -1719,7 +1756,7 @@ sync_create_image_with_data :: proc(
                         baseMipLevel = 0,
                         levelCount = 1,
                         baseArrayLayer = 0,
-                        layerCount = 1
+                        layerCount = create_info.array_layers
                     }
                 }
             }
@@ -1790,7 +1827,8 @@ sync_create_image_with_data :: proc(
         old_layout = .TRANSFER_DST_OPTIMAL,
         new_layout = .SHADER_READ_ONLY_OPTIMAL,
         aspect_mask = aspect_mask,
-        src_queue_family = gd.transfer_queue_family
+        src_queue_family = gd.transfer_queue_family,
+        array_layers = create_info.array_layers,
     }
     queue.push_back(&gd.pending_images, pending_image)
 
@@ -2008,6 +2046,7 @@ begin_gfx_command_buffer :: proc(
                     continue
                 }
 
+                // @TODO: Fix the barrier masks to not suck
                 barriers := []Image_Barrier {
                     {
                         src_stage_mask = {.ALL_COMMANDS},                       // Ignored in acquire operation
@@ -2024,7 +2063,7 @@ begin_gfx_command_buffer :: proc(
                             baseMipLevel = 0,
                             levelCount = 1,
                             baseArrayLayer = 0,
-                            layerCount = 1
+                            layerCount = pending_image.array_layers
                         }
                     }
                 }
