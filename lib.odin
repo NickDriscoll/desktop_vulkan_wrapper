@@ -915,7 +915,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 height = size,
                 depth = 1
             },
-            supports_mipmaps = false,
+            has_mipmaps = false,
             array_layers = 1,
             samples = {._1},
             tiling = .OPTIMAL,
@@ -1340,7 +1340,8 @@ Image_Create :: struct {
     image_type: vk.ImageType,
     format: vk.Format,
     extent: vk.Extent3D,
-    supports_mipmaps: bool,
+    has_mipmaps: bool,
+    mip_count: u32,
     array_layers: u32,
     samples: vk.SampleCountFlags,
     tiling: vk.ImageTiling,
@@ -1374,7 +1375,7 @@ vk_format_pixel_size :: proc(format: vk.Format) -> int {
     #partial switch format {
         case .R8G8B8A8_UNORM: return 4
         case .R8G8B8A8_SRGB: return 4
-        case .BC7_SRGB_BLOCK: return 1 //each 128-bit compressed texel block encodes a 4×4 rectangle
+        case .BC7_SRGB_BLOCK: return 1 //each 128-bit (16-byte) compressed texel block encodes a 4×4 rectangle
         case: {
             log.errorf("Tried to get byte size of unsupported pixel format: %v", format)
         }
@@ -1390,7 +1391,7 @@ create_image :: proc(gd: ^Graphics_Device, image_info: ^Image_Create) -> Image_H
 
     // Calculate mipmap count
     mip_count : u32 = 1
-    if image_info.supports_mipmaps {
+    if image_info.has_mipmaps {
         // Mipmaps are only for 2D images at least rn
         assert(image_info.image_type == .D2)
 
@@ -1655,21 +1656,37 @@ sync_create_image_with_data :: proc(
     // with no mips, actually loop over the known number of mips and layers
     // in order to correctly interpret the raw data
 
-    for i in 0..<create_info.array_layers {
-        // For each image in the array...
+    // for i in 0..<create_info.array_layers {
+    //     // For each image in the array...
 
-        // Determine the size in bytes of an individual image
-        bytes_per_pixel := vk_format_pixel_size(create_info.format)
-        bytes_per_image := u32(bytes_per_pixel) *
-                           create_info.extent.width *
-                           create_info.extent.height *
-                           create_info.extent.depth
+    //     // Determine the size in bytes of an individual image
+    //     bytes_per_pixel := vk_format_pixel_size(create_info.format)
+    //     bytes_per_image := u32(bytes_per_pixel) *
+    //                        create_info.extent.width *
+    //                        create_info.extent.height *
+    //                        create_info.extent.depth
 
-        
+    // }
+
+    // mip_count: u32 = 1
+    // if create_info.includes_mipmaps {
+    //     assert(create_info.image_type == .D2)
+    //     // Calculate number of mips
+    //     largest_dim := max(extent.width, extent.height)
+    //     mip_count = u32(math.log2(f32(largest_dim)) + 1)
+    // }
+
+    if !create_info.has_mipmaps {
+        create_info.mip_count = 1
+    }
+    
+    aspect_mask : vk.ImageAspectFlags = {.COLOR}
+    if create_info.format == .D32_SFLOAT {
+        aspect_mask = {.DEPTH}
     }
 
     bytes_size := len(bytes)
-    assert(bytes_size <= STAGING_BUFFER_SIZE, "Image too big for staging buffer. Nick, stop being lazy.")
+    assert(bytes_size < STAGING_BUFFER_SIZE, "Image too big for staging buffer. Nick, stop being lazy.")
     amount_transferred := 0
 
     // Upload the image data in STAGING_BUFFER_SIZE-sized chunks
@@ -1703,9 +1720,9 @@ sync_create_image_with_data :: proc(
                     new_layout = .TRANSFER_DST_OPTIMAL,
                     image = out_image.image,
                     subresource_range = {
-                        aspectMask = {.COLOR},
+                        aspectMask = aspect_mask,
                         baseMipLevel = 0,
-                        levelCount = 1,
+                        levelCount = create_info.mip_count,
                         baseArrayLayer = 0,
                         layerCount = create_info.array_layers
                     }
@@ -1714,15 +1731,16 @@ sync_create_image_with_data :: proc(
             cmd_transfer_pipeline_barriers(gd, cb_idx, barriers)
         }
 
+        // @TODO: Record one copy for each mip level
         image_copy := vk.BufferImageCopy {
             bufferOffset = vk.DeviceSize(amount_transferred),
             bufferRowLength = 0,
             bufferImageHeight = 0,
             imageSubresource = {
-                aspectMask = {.COLOR},
+                aspectMask = aspect_mask,
                 mipLevel = 0,
                 baseArrayLayer = 0,
-                layerCount = 1
+                layerCount = create_info.array_layers
             },
             imageOffset = {
                 x = 0,
@@ -1754,7 +1772,7 @@ sync_create_image_with_data :: proc(
                     subresource_range = {
                         aspectMask = {.COLOR},
                         baseMipLevel = 0,
-                        levelCount = 1,
+                        levelCount = create_info.mip_count,
                         baseArrayLayer = 0,
                         layerCount = create_info.array_layers
                     }
@@ -1814,12 +1832,6 @@ sync_create_image_with_data :: proc(
 
         gd.transfers_completed += 1
         amount_transferred += iter_size
-    }
-
-
-    aspect_mask : vk.ImageAspectFlags = {.COLOR}
-    if create_info.format == .D32_SFLOAT {
-        aspect_mask = {.DEPTH}
     }
 
     pending_image := Pending_Image {
