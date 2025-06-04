@@ -1369,6 +1369,7 @@ Pending_Image :: struct {
     aspect_mask: vk.ImageAspectFlags,
     src_queue_family: u32,
     array_layers: u32,
+    mip_count: u32,
 }
 
 vk_format_pixel_size :: proc(format: vk.Format) -> int {
@@ -1377,7 +1378,7 @@ vk_format_pixel_size :: proc(format: vk.Format) -> int {
         case .R8G8B8A8_SRGB: return 4
         case .BC7_SRGB_BLOCK: return 1 //each 128-bit (16-byte) compressed texel block encodes a 4×4 rectangle
         case: {
-            log.errorf("Tried to get byte size of unsupported pixel format: %v", format)
+            log.errorf("Tried to get byte size of unsupported pixel format (just add another switch case): %v", format)
         }
     }
     return 0
@@ -1521,6 +1522,28 @@ new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk
         aspect_mask = {.DEPTH}
     }
 
+    // Calculate mipmap count
+    mip_count : u32 = 1
+    if info.has_mipmaps {
+        // Mipmaps are only for 2D images at least rn
+        assert(info.image_type == .D2)
+
+        highest_bit_32 :: proc(n: u32) -> u32 {
+            n := n
+            i : u32 = 0
+
+            for n > 0 {
+                n = n >> 1
+                i += 1
+            }
+            return i
+        }
+
+        max_dim := max(info.extent.width, info.extent.height)
+        mip_count = highest_bit_32(max_dim)
+    }
+
+
     queue.push_back(&gd.pending_images, Pending_Image {
         handle = handle,
         old_layout = .UNDEFINED,
@@ -1528,6 +1551,7 @@ new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk
         aspect_mask = aspect_mask,
         src_queue_family = gd.gfx_queue_family,
         array_layers = info.array_layers,
+        mip_count = mip_count,
     })
 
 
@@ -1685,6 +1709,8 @@ sync_create_image_with_data :: proc(
         aspect_mask = {.DEPTH}
     }
 
+    bytes_per_pixel := u32(vk_format_pixel_size(create_info.format))
+
     bytes_size := len(bytes)
     assert(bytes_size < STAGING_BUFFER_SIZE, "Image too big for staging buffer. Nick, stop being lazy.")
     amount_transferred := 0
@@ -1731,29 +1757,58 @@ sync_create_image_with_data :: proc(
             cmd_transfer_pipeline_barriers(gd, cb_idx, barriers)
         }
 
+        bytes_in_mip_level :: proc(extent: vk.Extent3D, bytes_per_pixel: u32, level: u32) -> u32 {
+            mip_extent := vk.Extent3D {
+                width = extent.width >> level,
+                height = extent.height >> level,
+                depth = extent.depth >> level,
+            }
+            return bytes_per_pixel * mip_extent.width * mip_extent.height * mip_extent.depth
+        }
+
+        bytes_in_array_layer :: proc(extent: vk.Extent3D, bytes_per_pixel: u32, mip_count: u32) -> u32 {
+            total: u32 = 0
+            for i in 0..<mip_count {
+                total += bytes_in_mip_level(extent, bytes_per_pixel, i)
+            }
+            return total
+        }
+
         // @TODO: Record one copy for each mip level
-        image_copy := vk.BufferImageCopy {
-            bufferOffset = vk.DeviceSize(amount_transferred),
-            bufferRowLength = 0,
-            bufferImageHeight = 0,
-            imageSubresource = {
-                aspectMask = aspect_mask,
-                mipLevel = 0,
-                baseArrayLayer = 0,
-                layerCount = create_info.array_layers
-            },
-            imageOffset = {
-                x = 0,
-                y = 0,
-                z = 0
-            },
-            imageExtent = {
-                width = extent.width,
-                height = extent.height,
-                depth = extent.depth
+        buffer_offset: vk.DeviceSize = 0
+        for current_layer in 0..<create_info.array_layers {
+            for current_mip in 0..<create_info.mip_count {
+                copy_extent := vk.Extent3D {
+                    width = max(extent.width >> current_mip, 1),
+                    height = max(extent.height >> current_mip, 1),
+                    depth = max(extent.depth >> current_mip, 1),
+                }
+
+                image_copy := vk.BufferImageCopy {
+                    //bufferOffset = vk.DeviceSize(amount_transferred),
+                    bufferOffset = buffer_offset,
+                    bufferRowLength = 0,
+                    bufferImageHeight = 0,
+                    imageSubresource = {
+                        aspectMask = aspect_mask,
+                        mipLevel = current_mip,
+                        baseArrayLayer = current_layer,
+                        layerCount = 1
+                    },
+                    imageOffset = {
+                        x = 0,
+                        y = 0,
+                        z = 0
+                    },
+                    imageExtent = copy_extent
+                }
+
+                // @TODO: Move this call out of the loops
+                vk.CmdCopyBufferToImage(cb, sb.buffer, out_image.image, .TRANSFER_DST_OPTIMAL, 1, &image_copy)
+
+                buffer_offset += vk.DeviceSize(bytes_in_mip_level(extent^, bytes_per_pixel, current_mip))
             }
         }
-        vk.CmdCopyBufferToImage(cb, sb.buffer, out_image.image, .TRANSFER_DST_OPTIMAL, 1, &image_copy)
 
         // Record queue family ownership transfer on last iteration
         // @TODO: Barrier is overly opinionated about future usage
@@ -1841,6 +1896,7 @@ sync_create_image_with_data :: proc(
         aspect_mask = aspect_mask,
         src_queue_family = gd.transfer_queue_family,
         array_layers = create_info.array_layers,
+        mip_count = create_info.mip_count,
     }
     queue.push_back(&gd.pending_images, pending_image)
 
@@ -2073,7 +2129,7 @@ begin_gfx_command_buffer :: proc(
                         subresource_range = {
                             aspectMask = pending_image.aspect_mask,
                             baseMipLevel = 0,
-                            levelCount = 1,
+                            levelCount = pending_image.mip_count,
                             baseArrayLayer = 0,
                             layerCount = pending_image.array_layers
                         }
