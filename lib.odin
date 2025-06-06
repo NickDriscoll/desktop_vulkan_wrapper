@@ -894,7 +894,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
     // Put null texture in slot 0
     {
         // Make black and purple texture
-        size :: 16
+        size :: 1 << 4
         tex_data: [size*size*4]u8
         for i := 0; i < len(tex_data); i += 4 {
             pixel_idx := i/4
@@ -1806,10 +1806,10 @@ sync_create_image_with_data :: proc(
         if remaining_bytes <= STAGING_BUFFER_SIZE {
             barriers := []Image_Barrier {
                 {
-                    src_stage_mask = {.ALL_COMMANDS},
-                    src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+                    src_stage_mask = {.TRANSFER},
+                    src_access_mask = {.TRANSFER_WRITE},
                     dst_stage_mask = {.ALL_COMMANDS},                      // Ignored during release operation
-                    dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},        // Ignored during release operation
+                    dst_access_mask = {.MEMORY_READ},        // Ignored during release operation
                     old_layout = .TRANSFER_DST_OPTIMAL,
                     new_layout = .SHADER_READ_ONLY_OPTIMAL,
                     src_queue_family = gd.transfer_queue_family,
