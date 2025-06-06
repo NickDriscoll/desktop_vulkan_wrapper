@@ -1384,6 +1384,20 @@ vk_format_pixel_size :: proc(format: vk.Format) -> int {
     return 0
 }
 
+vk_format_block_size :: proc(format: vk.Format) -> int {
+    #partial switch format {
+        case .BC7_SRGB_BLOCK: return 16
+        case .BC7_UNORM_BLOCK: return 16
+        case .R8G8B8A8_UNORM: return 1
+        case .R8G8B8A8_SRGB: return 1
+        case: {
+            log.errorf("Unsupported block size format: %v", format)
+        }
+    }
+
+    return 0
+}
+
 create_image :: proc(gd: ^Graphics_Device, image_info: ^Image_Create) -> Image_Handle {
     // TRANSFER_DST is required for layout transitions period.
     // SAMPLED is required because all images in the system are
@@ -1675,36 +1689,11 @@ sync_create_image_with_data :: proc(
     sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     sb_ptr := sb.alloc_info.mapped_data
 
-    // CHANGE IN SOPHISTICATION!
-    // Instead of assuming that bytes contains exactly one image
-    // with no mips, actually loop over the known number of mips and layers
-    // in order to correctly interpret the raw data
-
-    // for i in 0..<create_info.array_layers {
-    //     // For each image in the array...
-
-    //     // Determine the size in bytes of an individual image
-    //     bytes_per_pixel := vk_format_pixel_size(create_info.format)
-    //     bytes_per_image := u32(bytes_per_pixel) *
-    //                        create_info.extent.width *
-    //                        create_info.extent.height *
-    //                        create_info.extent.depth
-
-    // }
-
-    // mip_count: u32 = 1
-    // if create_info.includes_mipmaps {
-    //     assert(create_info.image_type == .D2)
-    //     // Calculate number of mips
-    //     largest_dim := max(extent.width, extent.height)
-    //     mip_count = u32(math.log2(f32(largest_dim)) + 1)
-    // }
-
     if !create_info.has_mipmaps {
         create_info.mip_count = 1
     }
     
-    aspect_mask : vk.ImageAspectFlags = {.COLOR}
+    aspect_mask : vk.ImageAspectFlags = {.COLOR} 
     if create_info.format == .D32_SFLOAT {
         aspect_mask = {.DEPTH}
     }
@@ -1757,24 +1746,25 @@ sync_create_image_with_data :: proc(
             cmd_transfer_pipeline_barriers(gd, cb_idx, barriers)
         }
 
-        bytes_in_mip_level :: proc(extent: vk.Extent3D, bytes_per_pixel: u32, level: u32) -> u32 {
-            mip_extent := vk.Extent3D {
-                width = extent.width >> level,
-                height = extent.height >> level,
-                depth = extent.depth >> level,
-            }
-            return bytes_per_pixel * mip_extent.width * mip_extent.height * mip_extent.depth
-        }
+        // bytes_in_mip_level :: proc(extent: vk.Extent3D, bytes_per_pixel: u32, level: u32) -> u32 {
+        //     mip_extent := vk.Extent3D {
+        //         width = extent.width >> level,
+        //         height = extent.height >> level,
+        //         depth = extent.depth >> level,
+        //     }
+        //     return bytes_per_pixel * mip_extent.width * mip_extent.height * mip_extent.depth
+        // }
 
-        bytes_in_array_layer :: proc(extent: vk.Extent3D, bytes_per_pixel: u32, mip_count: u32) -> u32 {
-            total: u32 = 0
-            for i in 0..<mip_count {
-                total += bytes_in_mip_level(extent, bytes_per_pixel, i)
-            }
-            return total
-        }
+        // bytes_in_array_layer :: proc(extent: vk.Extent3D, bytes_per_pixel: u32, mip_count: u32) -> u32 {
+        //     total: u32 = 0
+        //     for i in 0..<mip_count {
+        //         total += bytes_in_mip_level(extent, bytes_per_pixel, i)
+        //     }
+        //     return total
+        // }
 
         // @TODO: Record one copy for each mip level
+        min_blocksize := u32(vk_format_block_size(create_info.format))
         buffer_offset: vk.DeviceSize = 0
         for current_layer in 0..<create_info.array_layers {
             for current_mip in 0..<create_info.mip_count {
@@ -1784,29 +1774,30 @@ sync_create_image_with_data :: proc(
                     depth = max(extent.depth >> current_mip, 1),
                 }
 
-                image_copy := vk.BufferImageCopy {
-                    //bufferOffset = vk.DeviceSize(amount_transferred),
-                    bufferOffset = buffer_offset,
-                    bufferRowLength = 0,
-                    bufferImageHeight = 0,
-                    imageSubresource = {
-                        aspectMask = aspect_mask,
-                        mipLevel = current_mip,
-                        baseArrayLayer = current_layer,
-                        layerCount = 1
-                    },
-                    imageOffset = {
-                        x = 0,
-                        y = 0,
-                        z = 0
-                    },
-                    imageExtent = copy_extent
+                if extent.width % min_blocksize == 0 && extent.width % min_blocksize == 0 && extent.width % min_blocksize == 0 {
+                    image_copy := vk.BufferImageCopy {
+                        bufferOffset = buffer_offset,
+                        bufferRowLength = 0,
+                        bufferImageHeight = 0,
+                        imageSubresource = {
+                            aspectMask = aspect_mask,
+                            mipLevel = current_mip,
+                            baseArrayLayer = current_layer,
+                            layerCount = 1
+                        },
+                        imageOffset = {
+                            x = 0,
+                            y = 0,
+                            z = 0
+                        },
+                        imageExtent = copy_extent
+                    }
+    
+                    // @TODO: Move this call out of the loops
+                    vk.CmdCopyBufferToImage(cb, sb.buffer, out_image.image, .TRANSFER_DST_OPTIMAL, 1, &image_copy)
                 }
 
-                // @TODO: Move this call out of the loops
-                vk.CmdCopyBufferToImage(cb, sb.buffer, out_image.image, .TRANSFER_DST_OPTIMAL, 1, &image_copy)
-
-                buffer_offset += vk.DeviceSize(bytes_in_mip_level(extent^, bytes_per_pixel, current_mip))
+                buffer_offset += max(vk.DeviceSize(min_blocksize), vk.DeviceSize(bytes_per_pixel * copy_extent.width * copy_extent.height * copy_extent.depth))
             }
         }
 
