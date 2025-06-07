@@ -1766,6 +1766,7 @@ sync_create_image_with_data :: proc(
         // @TODO: Record one copy for each mip level
         min_blocksize := u32(vk_format_block_size(create_info.format))
         buffer_offset: vk.DeviceSize = 0
+        copies := make([dynamic]vk.BufferImageCopy, 0, create_info.array_layers * create_info.mip_count, context.temp_allocator)
         for current_layer in 0..<create_info.array_layers {
             for current_mip in 0..<create_info.mip_count {
                 copy_extent := vk.Extent3D {
@@ -1774,7 +1775,8 @@ sync_create_image_with_data :: proc(
                     depth = max(extent.depth >> current_mip, 1),
                 }
 
-                if extent.width % min_blocksize == 0 && extent.width % min_blocksize == 0 && extent.width % min_blocksize == 0 {
+                //if copy_extent.width > 4 && copy_extent.height > 4 && copy_extent.depth > 0 {
+                {
                     image_copy := vk.BufferImageCopy {
                         bufferOffset = buffer_offset,
                         bufferRowLength = 0,
@@ -1792,14 +1794,13 @@ sync_create_image_with_data :: proc(
                         },
                         imageExtent = copy_extent
                     }
-    
-                    // @TODO: Move this call out of the loops
-                    vk.CmdCopyBufferToImage(cb, sb.buffer, out_image.image, .TRANSFER_DST_OPTIMAL, 1, &image_copy)
+                    append(&copies, image_copy)
                 }
 
                 buffer_offset += max(vk.DeviceSize(min_blocksize), vk.DeviceSize(bytes_per_pixel * copy_extent.width * copy_extent.height * copy_extent.depth))
             }
         }
+        vk.CmdCopyBufferToImage(cb, sb.buffer, out_image.image, .TRANSFER_DST_OPTIMAL, u32(len(copies)), raw_data(copies))
 
         // Record queue family ownership transfer on last iteration
         // @TODO: Barrier is overly opinionated about future usage
