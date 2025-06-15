@@ -1746,24 +1746,6 @@ sync_create_image_with_data :: proc(
             cmd_transfer_pipeline_barriers(gd, cb_idx, barriers)
         }
 
-        // bytes_in_mip_level :: proc(extent: vk.Extent3D, bytes_per_pixel: u32, level: u32) -> u32 {
-        //     mip_extent := vk.Extent3D {
-        //         width = extent.width >> level,
-        //         height = extent.height >> level,
-        //         depth = extent.depth >> level,
-        //     }
-        //     return bytes_per_pixel * mip_extent.width * mip_extent.height * mip_extent.depth
-        // }
-
-        // bytes_in_array_layer :: proc(extent: vk.Extent3D, bytes_per_pixel: u32, mip_count: u32) -> u32 {
-        //     total: u32 = 0
-        //     for i in 0..<mip_count {
-        //         total += bytes_in_mip_level(extent, bytes_per_pixel, i)
-        //     }
-        //     return total
-        // }
-
-        // @TODO: Record one copy for each mip level
         min_blocksize := u32(vk_format_block_size(create_info.format))
         buffer_offset: vk.DeviceSize = 0
         copies := make([dynamic]vk.BufferImageCopy, 0, create_info.array_layers * create_info.mip_count, context.temp_allocator)
@@ -1810,7 +1792,7 @@ sync_create_image_with_data :: proc(
                     src_stage_mask = {.TRANSFER},
                     src_access_mask = {.TRANSFER_WRITE},
                     dst_stage_mask = {.ALL_COMMANDS},                      // Ignored during release operation
-                    dst_access_mask = {.MEMORY_READ},        // Ignored during release operation
+                    dst_access_mask = {.MEMORY_READ},                      // Ignored during release operation
                     old_layout = .TRANSFER_DST_OPTIMAL,
                     new_layout = .SHADER_READ_ONLY_OPTIMAL,
                     src_queue_family = gd.transfer_queue_family,
@@ -1920,8 +1902,9 @@ acquire_swapchain_image :: proc(
     sem := get_semaphore(gd, gd.acquire_semaphores[idx]) or_return
 
     out_image_idx: u32
-    if vk.AcquireNextImageKHR(gd.device, gd.swapchain, max(u64), sem^, 0, &out_image_idx) != .SUCCESS {
-        log.error("Failed to acquire swapchain image")
+    res := vk.AcquireNextImageKHR(gd.device, gd.swapchain, max(u64), sem^, 0, &out_image_idx)
+    if res != .SUCCESS {
+        log.errorf("Failed to acquire swapchain image: %v", res)
         return 0, false
     }
 
@@ -1963,7 +1946,6 @@ acquire_swapchain_image :: proc(
 
 present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> bool {
     sem := get_semaphore(gd, gd.present_semaphores[image_idx^]) or_return
-    info_res: vk.Result
     info := vk.PresentInfoKHR {
         sType = .PRESENT_INFO_KHR,
         pNext = nil,
@@ -1972,14 +1954,11 @@ present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> bool {
         swapchainCount = 1,
         pSwapchains = &gd.swapchain,
         pImageIndices = image_idx,
-        pResults = &info_res
+        pResults = nil
     }
-    if vk.QueuePresentKHR(gd.gfx_queue, &info) != .SUCCESS {
-        log.error("Failed to present swapchain image.")
-        return false
-    }
-    if info_res != .SUCCESS {
-        log.error("Queue present individual failure.")
+    res := vk.QueuePresentKHR(gd.gfx_queue, &info)
+    if res != .SUCCESS {
+        log.errorf("Failed to present swapchain image: %v", res)
         return false
     }
     return true
