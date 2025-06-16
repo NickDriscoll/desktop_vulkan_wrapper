@@ -1129,7 +1129,6 @@ resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
     assert(gd.swapchain != 0)
 
     old_swapchain_handles := make([dynamic]Image_Handle, len(gd.swapchain_images), context.temp_allocator)
-    defer delete(old_swapchain_handles)
     for handle, i in gd.swapchain_images do old_swapchain_handles[i] = handle
 
     window_create_swapchain(gd, new_dims) or_return
@@ -1897,25 +1896,26 @@ acquire_swapchain_image :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
     sync: ^Sync_Info,
-) -> (image_idx: u32, ok: bool) {
+) -> (image_idx: u32, res: vk.Result) {
     idx := in_flight_idx(gd)
-    sem := get_semaphore(gd, gd.acquire_semaphores[idx]) or_return
+    sem, sem_ok := get_semaphore(gd, gd.acquire_semaphores[idx])
+    if !sem_ok {
+        log.error("Couldn't get acquire semaphore.")
+    }
 
-    out_image_idx: u32
-    res := vk.AcquireNextImageKHR(gd.device, gd.swapchain, max(u64), sem^, 0, &out_image_idx)
+    res = vk.AcquireNextImageKHR(gd.device, gd.swapchain, max(u64), sem^, 0, &image_idx)
     if res != .SUCCESS {
-        log.errorf("Failed to acquire swapchain image: %v", res)
-        return 0, false
+        return
     }
 
     // Define execution and memory dependencies surrounding swapchain image acquire
 
     // Wait on swapchain image acquire semaphore
     // and signal when we're done drawing on a different semaphore
-    add_wait_op(gd, sync, gd.acquire_semaphores[in_flight_idx(gd)])
-    add_signal_op(gd, sync, gd.present_semaphores[out_image_idx])
+    add_wait_op(gd, sync, gd.acquire_semaphores[idx])
+    add_signal_op(gd, sync, gd.present_semaphores[image_idx])
 
-    swapchain_image_handle := gd.swapchain_images[out_image_idx]
+    swapchain_image_handle := gd.swapchain_images[image_idx]
 
     // Memory barrier between swapchain acquire and rendering
     swapchain_vkimage, _ := get_image_vkhandle(gd, swapchain_image_handle)
@@ -1941,11 +1941,14 @@ acquire_swapchain_image :: proc(
     })
 
 
-    return out_image_idx, true
+    return
 }
 
-present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> bool {
-    sem := get_semaphore(gd, gd.present_semaphores[image_idx^]) or_return
+present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> vk.Result {
+    sem, sem_ok := get_semaphore(gd, gd.present_semaphores[image_idx^])
+    if !sem_ok {
+        log.error("Couldn't get present semaphore.")
+    }
     info := vk.PresentInfoKHR {
         sType = .PRESENT_INFO_KHR,
         pNext = nil,
@@ -1958,10 +1961,9 @@ present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> bool {
     }
     res := vk.QueuePresentKHR(gd.gfx_queue, &info)
     if res != .SUCCESS {
-        log.errorf("Failed to present swapchain image: %v", res)
-        return false
+        return res
     }
-    return true
+    return res
 }
 
 
@@ -2243,7 +2245,7 @@ submit_gfx_and_present :: proc(
     cb_idx: CommandBuffer_Index,
     sync: ^Sync_Info,
     swapchain_idx: ^u32
-) {
+) -> vk.Result {
     // Memory barrier between rendering to swapchain image and swapchain present
     swapchain_image, _ := get_image_vkhandle(gd, gd.swapchain_images[swapchain_idx^])
     cmd_gfx_pipeline_barriers(gd, cb_idx, {
@@ -2268,9 +2270,11 @@ submit_gfx_and_present :: proc(
     })
 
     submit_gfx_command_buffer(gd, cb_idx, sync)
-    present_swapchain_image(gd, swapchain_idx)
+    present_res := present_swapchain_image(gd, swapchain_idx)
 
     gd.frame_count += 1
+
+    return present_res
 }
 
 
