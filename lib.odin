@@ -22,6 +22,29 @@ MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
 PUSH_CONSTANTS_SIZE :: 128
 STAGING_BUFFER_SIZE :: 16 * 1024 * 1024
 
+PIPELINE_CACHE :: ".shadercache"
+
+create_write_file :: proc(filename: string) -> (os.Handle, os.Error) {
+    h: os.Handle
+
+    err: os.Errno
+    when ODIN_OS == .Windows {
+        h, err = os.open(
+            filename,
+            os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+        )
+    }
+    when ODIN_OS == .Linux {
+        h, err = os.open(
+            filename,
+            os.O_WRONLY | os.O_CREATE | os.O_TRUNC,
+            os.S_IRUSR | os.S_IWUSR
+        )
+    }
+
+    return h, err
+}
+
 // All buffers are read/written by the GPU using Buffer Device Address
 // As such, we only need descriptor slots for images and samplers
 Bindless_Descriptor_Bindings :: enum u32 {
@@ -105,7 +128,7 @@ Graphics_Device :: struct {
     physical_device: vk.PhysicalDevice,
     physical_device_properties: vk.PhysicalDeviceProperties2,
     device: vk.Device,
-    pipeline_cache: vk.PipelineCache,       // @TODO: Actually use pipeline cache
+    pipeline_cache: vk.PipelineCache,
     alloc_callbacks: ^vk.AllocationCallbacks,
     allocator: vma.Allocator,
 
@@ -929,10 +952,59 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
     }
 
+    // Initialize pipeline cache
+    {
+        // Check for existance of existing cache
+        pipeline_cache_bytes, cache_exists := os.read_entire_file_from_filename(PIPELINE_CACHE)
+        data_ptr: rawptr
+        data_size: int
+        if cache_exists {
+            data_ptr = &pipeline_cache_bytes[0]
+            data_size = len(pipeline_cache_bytes)
+        } else {
+            log.warn("Didn't find shader cache.")
+        }
+
+        info := vk.PipelineCacheCreateInfo {
+            sType = .PIPELINE_CACHE_CREATE_INFO,
+            pNext = nil,
+            flags = nil,
+            initialDataSize = data_size,
+            pInitialData = data_ptr
+        }
+        res := vk.CreatePipelineCache(gd.device, &info, gd.alloc_callbacks, &gd.pipeline_cache)
+        if res != nil {
+            log.errorf("Error creating pipeline cache: %v", res)
+        }
+    }
+
     return gd, .SUCCESS
 }
 
 quit_vulkan :: proc(gd: ^Graphics_Device) {
+    // Save the pipeline cache to a file
+    {
+        res: vk.Result
+        data_size: int
+        res = vk.GetPipelineCacheData(gd.device, gd.pipeline_cache, &data_size, nil)
+        if res != nil {
+            log.errorf("Error getting pipeline cache size: %v", res)
+        }
+        assert(data_size > 0)
+
+        pipeline_data := make([dynamic]byte, data_size, context.temp_allocator)
+        res = vk.GetPipelineCacheData(gd.device, gd.pipeline_cache, &data_size, &pipeline_data[0])
+        if res != nil {
+            log.errorf("Error getting pipeline cache data: %v", res)
+        }
+
+        cache_file, err := create_write_file(PIPELINE_CACHE)
+        if err == nil {
+            os.write(cache_file, pipeline_data[:])
+        }
+        os.close(cache_file)
+    }
+
     vk.DestroySwapchainKHR(gd.device, gd.swapchain, gd.alloc_callbacks)
     vk.DestroySurfaceKHR(gd.instance, gd.surface, gd.alloc_callbacks)
 
