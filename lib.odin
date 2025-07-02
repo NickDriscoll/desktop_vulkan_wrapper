@@ -21,6 +21,7 @@ MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
 // Sizes in bytes
 PUSH_CONSTANTS_SIZE :: 128
 STAGING_BUFFER_SIZE :: 16 * 1024 * 1024
+AS_BUFFER_SIZE :: 16 * 1024 * 1024
 
 PIPELINE_CACHE :: ".shadercache"
 
@@ -43,6 +44,11 @@ create_write_file :: proc(filename: string) -> (os.Handle, os.Error) {
     }
 
     return h, err
+}
+
+size_to_alignment :: proc(size: $T, alignment: T) -> T {
+    assert(alignment > 0)
+    return (size + (alignment - 1)) & ~(alignment - 1)
 }
 
 // All buffers are read/written by the GPU using Buffer Device Address
@@ -183,6 +189,10 @@ Graphics_Device :: struct {
     transfer_timeline: Semaphore_Handle,
     transfers_completed: u64,
 
+    AS_buffer: Buffer_Handle,
+    AS_head: vk.DeviceSize,
+    AS_scratch_buffer: Buffer_Handle,
+    AS_scratch_size: vk.DeviceSize,
 
     // Pipeline layouts used for all pipelines
     gfx_pipeline_layout: vk.PipelineLayout,
@@ -904,6 +914,19 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         gd.staging_buffer = create_buffer(&gd, &info)
     }
 
+    // Create acceleration structure buffer
+    if .Raytracing in params.support_flags {
+        info := Buffer_Info {
+            size = AS_BUFFER_SIZE,
+            usage = {.ACCELERATION_STRUCTURE_STORAGE_KHR},
+            required_flags = {.DEVICE_LOCAL},
+            name = "Global acceleration structure buffer",
+        }
+        gd.AS_buffer = create_buffer(&gd, &info)
+
+        gd.AS_scratch_buffer.generation = 0xFFFFFFFF
+    }
+
     // Create transfer timeline semaphore
     {
         info := Semaphore_Info {
@@ -1003,6 +1026,8 @@ quit_vulkan :: proc(gd: ^Graphics_Device) {
             os.write(cache_file, pipeline_data[:])
         }
         os.close(cache_file)
+
+        vk.DestroyPipelineCache(gd.device, gd.pipeline_cache, gd.alloc_callbacks)
     }
 
     vk.DestroySwapchainKHR(gd.device, gd.swapchain, gd.alloc_callbacks)
@@ -3240,11 +3265,11 @@ AccelerationStructure :: struct {
 }
 AccelerationStructureCreateInfo :: struct {
     flags: vk.AccelerationStructureCreateFlagsKHR,
-    buffer: Buffer_Handle,
-    offset: vk.DeviceSize,       // Must be multiple of 256
-    size: vk.DeviceSize,
+    // buffer: Buffer_Handle,
+    // offset: vk.DeviceSize,       // Must be multiple of 256
+    // size: vk.DeviceSize,
     type: vk.AccelerationStructureTypeKHR,
-    device_address: vk.DeviceAddress,
+    //device_address: vk.DeviceAddress,     // Only relevant when using the (useless) capture/replay feature
 }
 
 ASTriangleData :: struct {
@@ -3276,42 +3301,15 @@ AccelerationStructureBuildInfo :: struct {
     range_info: vk.AccelerationStructureBuildRangeInfoKHR,
 }
 
-create_acceleration_structure :: proc(
-    gd: ^Graphics_Device,
-    info: AccelerationStructureCreateInfo,
-) -> Acceleration_Structure_Handle {
-    new_as: AccelerationStructure
-
-    as_buffer, _ := get_buffer(gd, info.buffer)
-    info := vk.AccelerationStructureCreateInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        pNext = nil,
-        createFlags = info.flags,
-        buffer = as_buffer.buffer,
-        offset = info.offset,
-        size = info.size,
-        type = info.type,
-        deviceAddress = info.device_address
-    }
-    res := vk.CreateAccelerationStructureKHR(gd.device, &info, gd.alloc_callbacks, &new_as.as)
-    if res != .SUCCESS {
-        log.errorf("Failed to create acceleration structure: %v", res)
-    }
-    return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, new_as))
-}
-get_acceleration_structure_build_sizes :: proc(
-    gd: ^Graphics_Device,
-    info: AccelerationStructureBuildInfo
-) -> vk.AccelerationStructureBuildSizesInfoKHR {
-    size_info: vk.AccelerationStructureBuildSizesInfoKHR
-    size_info.sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
-
-    geos := make([dynamic]vk.AccelerationStructureGeometryKHR, 0, len(info.geometries), context.temp_allocator)
-    for geo in info.geometries {
+make_geo_data_structs :: proc(geometries: []AccelerationStructureGeometry) -> [dynamic]vk.AccelerationStructureGeometryKHR {
+    geos := make([dynamic]vk.AccelerationStructureGeometryKHR, 0, len(geometries), context.temp_allocator)
+    for geo in geometries {
         geo_data: vk.AccelerationStructureGeometryDataKHR
         switch d in geo.geometry {
             case ASTriangleData: {
                 geo_data.triangles = vk.AccelerationStructureGeometryTrianglesDataKHR {
+                    sType = .ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+                    pNext = nil,
                     vertexFormat = d.vertex_format,
                     vertexData = d.vertex_data,
                     vertexStride = d.vertex_stride,
@@ -3322,7 +3320,6 @@ get_acceleration_structure_build_sizes :: proc(
                 }
             }
         }
-
         append(&geos, vk.AccelerationStructureGeometryKHR {
             sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
             pNext = nil,
@@ -3331,6 +3328,17 @@ get_acceleration_structure_build_sizes :: proc(
             flags = geo.flags
         })
     }
+    return geos
+}
+
+get_acceleration_structure_build_sizes :: proc(
+    gd: ^Graphics_Device,
+    info: AccelerationStructureBuildInfo
+) -> vk.AccelerationStructureBuildSizesInfoKHR {
+    size_info: vk.AccelerationStructureBuildSizesInfoKHR
+    size_info.sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
+
+    geos := make_geo_data_structs(info.geometries)
 
     build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
         sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
@@ -3351,6 +3359,50 @@ get_acceleration_structure_build_sizes :: proc(
     return size_info
 }
 
+create_acceleration_structure :: proc(
+    gd: ^Graphics_Device,
+    create_info: AccelerationStructureCreateInfo,
+    build_info: AccelerationStructureBuildInfo
+) -> Acceleration_Structure_Handle {
+    assert(.Raytracing in gd.support_flags)
+    new_as: AccelerationStructure
+
+    build_sizes := get_acceleration_structure_build_sizes(gd, build_info)
+
+    // If scratch size is larger than current scratch buffer, reallocate scratch buffer
+    if gd.AS_scratch_size < build_sizes.buildScratchSize {
+        delete_buffer(gd, gd.AS_scratch_buffer)
+    
+        info := Buffer_Info {
+            size = build_sizes.buildScratchSize,
+            usage = {.ACCELERATION_STRUCTURE_STORAGE_KHR,.TRANSFER_SRC},
+            required_flags = {.DEVICE_LOCAL},
+            name = "Acceleration structure scratch buffer",
+        }
+        gd.AS_scratch_buffer = create_buffer(gd, &info)
+
+        gd.AS_scratch_size = build_sizes.buildScratchSize
+    }
+
+    as_buffer, _ := get_buffer(gd, gd.AS_buffer)
+    info := vk.AccelerationStructureCreateInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        pNext = nil,
+        createFlags = create_info.flags,
+        buffer = as_buffer.buffer,
+        offset = vk.DeviceSize(gd.AS_head),
+        size = build_sizes.accelerationStructureSize,
+        type = create_info.type,
+        //deviceAddress = info.device_address
+    }
+    res := vk.CreateAccelerationStructureKHR(gd.device, &info, gd.alloc_callbacks, &new_as.as)
+    if res != .SUCCESS {
+        log.errorf("Failed to create acceleration structure: %v", res)
+    }
+    gd.AS_head += size_to_alignment(build_sizes.accelerationStructureSize, 256)
+    return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, new_as))
+}
+
 cmd_build_acceleration_structures :: proc(
     gd: ^Graphics_Device,
     infos: []AccelerationStructureBuildInfo
@@ -3361,30 +3413,7 @@ cmd_build_acceleration_structures :: proc(
     range_infos := make([dynamic]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     range_info_ptrs := make([dynamic][^]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     for info in infos {
-        geos := make([dynamic]vk.AccelerationStructureGeometryKHR, 0, len(info.geometries), context.temp_allocator)
-        for geo in info.geometries {
-            geo_data: vk.AccelerationStructureGeometryDataKHR
-            switch d in geo.geometry {
-                case ASTriangleData: {
-                    geo_data.triangles = vk.AccelerationStructureGeometryTrianglesDataKHR {
-                        vertexFormat = d.vertex_format,
-                        vertexData = d.vertex_data,
-                        vertexStride = d.vertex_stride,
-                        maxVertex = d.max_vertex,
-                        indexType = d.index_type,
-                        indexData = d.index_data,
-                        transformData = d.transform_data
-                    }
-                }
-            }
-            append(&geos, vk.AccelerationStructureGeometryKHR {
-                sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
-                pNext = nil,
-                geometryType = geo.type,
-                geometry = geo_data,
-                flags = geo.flags
-            })
-        }
+        geos := make_geo_data_structs(info.geometries)
 
         build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
             sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
