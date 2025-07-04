@@ -203,7 +203,7 @@ Graphics_Device :: struct {
     // Handle_Maps of all Vulkan objects
     buffers: hm.Handle_Map(Buffer),
     images: hm.Handle_Map(Image),
-    acceleration_structures: hm.Handle_Map(AccelerationStructure),
+    acceleration_structures: hm.Handle_Map(vk.AccelerationStructureKHR),
     semaphores: hm.Handle_Map(vk.Semaphore),
     pipelines: hm.Handle_Map(vk.Pipeline),
 
@@ -3272,10 +3272,6 @@ create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineI
 
 
 // Acceleration structure section
-
-AccelerationStructure :: struct {
-    as: vk.AccelerationStructureKHR,
-}
 AccelerationStructureCreateInfo :: struct {
     flags: vk.AccelerationStructureCreateFlagsKHR,
     // buffer: Buffer_Handle,
@@ -3308,7 +3304,7 @@ AccelerationStructureBuildInfo :: struct {
     mode: vk.BuildAccelerationStructureModeKHR,
     src: vk.AccelerationStructureKHR,
     dst: vk.AccelerationStructureKHR,
-    geometries: []AccelerationStructureGeometry,
+    geometries: [dynamic]AccelerationStructureGeometry,
     prim_counts: []u32,
     //scratch_data: vk.DeviceOrHostAddressKHR,
     range_info: vk.AccelerationStructureBuildRangeInfoKHR,
@@ -3355,7 +3351,7 @@ get_acceleration_structure_build_sizes :: proc(
     size_info: vk.AccelerationStructureBuildSizesInfoKHR
     size_info.sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
 
-    geos := make_geo_data_structs(info.geometries)
+    geos := make_geo_data_structs(info.geometries[:])
 
     build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
         sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
@@ -3379,12 +3375,10 @@ get_acceleration_structure_build_sizes :: proc(
 create_acceleration_structure :: proc(
     gd: ^Graphics_Device,
     create_info: AccelerationStructureCreateInfo,
-    build_info: AccelerationStructureBuildInfo
+    build_info: ^AccelerationStructureBuildInfo
 ) -> Acceleration_Structure_Handle {
     assert(.Raytracing in gd.support_flags)
-    new_as: AccelerationStructure
-
-    build_sizes := get_acceleration_structure_build_sizes(gd, build_info)
+    build_sizes := get_acceleration_structure_build_sizes(gd, build_info^)
 
     // If scratch size is larger than current scratch buffer, reallocate scratch buffer
     if gd.AS_scratch_size < build_sizes.buildScratchSize {
@@ -3392,7 +3386,7 @@ create_acceleration_structure :: proc(
     
         info := Buffer_Info {
             size = gd.AS_scratch_size + build_sizes.buildScratchSize,
-            usage = {.ACCELERATION_STRUCTURE_STORAGE_KHR,.TRANSFER_SRC},
+            usage = {.STORAGE_BUFFER},
             required_flags = {.DEVICE_LOCAL},
             name = "Acceleration structure scratch buffer",
         }
@@ -3413,16 +3407,16 @@ create_acceleration_structure :: proc(
         type = create_info.type,
         //deviceAddress = info.device_address           // Only relevant when using the (useless) capture/replay feature
     }
-    res := vk.CreateAccelerationStructureKHR(gd.device, &info, gd.alloc_callbacks, &new_as.as)
+    res := vk.CreateAccelerationStructureKHR(gd.device, &info, gd.alloc_callbacks, &build_info.dst)
     if res != .SUCCESS {
         log.errorf("Failed to create acceleration structure: %v", res)
     }
     gd.AS_head += size_to_alignment(build_sizes.accelerationStructureSize, 256)
 
     // Queue build info for per-frame AS building step
-    queue.append(&gd.AS_queued_build_infos, build_info)
+    queue.append(&gd.AS_queued_build_infos, build_info^)
 
-    return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, new_as))
+    return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, build_info.dst))
 }
 
 cmd_build_acceleration_structures :: proc(
@@ -3436,7 +3430,7 @@ cmd_build_acceleration_structures :: proc(
     range_infos := make([dynamic]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     range_info_ptrs := make([dynamic][^]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     for info in infos {
-        geos := make_geo_data_structs(info.geometries)
+        geos := make_geo_data_structs(info.geometries[:])
 
         build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
             sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
