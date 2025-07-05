@@ -3308,6 +3308,7 @@ AccelerationStructureBuildInfo :: struct {
     prim_counts: []u32,
     //scratch_data: vk.DeviceOrHostAddressKHR,
     range_info: vk.AccelerationStructureBuildRangeInfoKHR,
+    build_scratch_size: vk.DeviceSize,
 }
 
 make_geo_data_structs :: proc(geometries: []AccelerationStructureGeometry) -> [dynamic]vk.AccelerationStructureGeometryKHR {
@@ -3412,6 +3413,7 @@ create_acceleration_structure :: proc(
         log.errorf("Failed to create acceleration structure: %v", res)
     }
     gd.AS_head += size_to_alignment(build_sizes.accelerationStructureSize, 256)
+    build_info.build_scratch_size = build_sizes.buildScratchSize
 
     // Queue build info for per-frame AS building step
     queue.append(&gd.AS_queued_build_infos, build_info^)
@@ -3429,7 +3431,8 @@ cmd_build_acceleration_structures :: proc(
     g_infos := make([dynamic]vk.AccelerationStructureBuildGeometryInfoKHR, 0, len(infos), context.temp_allocator)
     range_infos := make([dynamic]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     range_info_ptrs := make([dynamic][^]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
-    for info in infos {
+    scratch_addr_offset : vk.DeviceAddress = 0
+    for info, i in infos {
         geos := make_geo_data_structs(info.geometries[:])
 
         build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
@@ -3444,7 +3447,7 @@ cmd_build_acceleration_structures :: proc(
             pGeometries = raw_data(geos),
             ppGeometries = nil,
             scratchData = {
-                deviceAddress = scratch_buffer.address
+                deviceAddress = scratch_buffer.address + scratch_addr_offset
             }
         }
         range_info := vk.AccelerationStructureBuildRangeInfoKHR {
@@ -3453,9 +3456,10 @@ cmd_build_acceleration_structures :: proc(
             firstVertex = info.range_info.firstVertex,
             transformOffset = info.range_info.transformOffset,
         }
+        scratch_addr_offset += vk.DeviceAddress(info.build_scratch_size)
         append(&range_infos, range_info)
         append(&g_infos, build_info)
-        append(&range_info_ptrs, raw_data(range_infos))
+        append(&range_info_ptrs, &range_infos[i])
     }
 
     vk.CmdBuildAccelerationStructuresKHR(cb, u32(len(infos)), raw_data(g_infos), raw_data(range_info_ptrs))
