@@ -194,6 +194,7 @@ Graphics_Device :: struct {
     AS_head: vk.DeviceSize,
     AS_scratch_buffer: Buffer_Handle,
     AS_scratch_size: vk.DeviceSize,
+    AS_required_scratch_size: vk.DeviceSize,
     AS_queued_build_infos: queue.Queue(AccelerationStructureBuildInfo),
 
     // Pipeline layouts used for all pipelines
@@ -2210,8 +2211,6 @@ begin_gfx_command_buffer :: proc(
                 }
                 cmd_gfx_pipeline_barriers(gd, cb_idx, barriers)
 
-                // @TODO: Record mipmap generation commands
-
                 // Save descriptor update data
                 append(&d_image_infos, vk.DescriptorImageInfo {
                     imageView = underlying_image.image_view,
@@ -2242,6 +2241,7 @@ begin_gfx_command_buffer :: proc(
                 append(&build_infos, as_build_info)
             }
             cmd_build_acceleration_structures(gd, build_infos[:])
+            gd.AS_required_scratch_size = 0
         }
     }
 
@@ -3382,18 +3382,19 @@ create_acceleration_structure :: proc(
     build_sizes := get_acceleration_structure_build_sizes(gd, build_info^)
 
     // If scratch size is larger than current scratch buffer, reallocate scratch buffer
-    if gd.AS_scratch_size < build_sizes.buildScratchSize {
+    gd.AS_required_scratch_size += build_sizes.buildScratchSize
+    if gd.AS_scratch_size < gd.AS_required_scratch_size {
         delete_buffer(gd, gd.AS_scratch_buffer)
     
         info := Buffer_Info {
-            size = gd.AS_scratch_size + build_sizes.buildScratchSize,
+            size = gd.AS_required_scratch_size,
             usage = {.STORAGE_BUFFER},
             required_flags = {.DEVICE_LOCAL},
             name = "Acceleration structure scratch buffer",
         }
         gd.AS_scratch_buffer = create_buffer(gd, &info)
+        gd.AS_scratch_size += gd.AS_required_scratch_size
 
-        gd.AS_scratch_size += build_sizes.buildScratchSize
         log.warnf("Resized acceleration structure scratch buffer to %v bytes.", gd.AS_scratch_size)
     }
 
