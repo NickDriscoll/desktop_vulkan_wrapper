@@ -190,12 +190,12 @@ Graphics_Device :: struct {
     transfers_completed: u64,
 
     // Acceleration structure state
-    AS_buffer: Buffer_Handle,
-    AS_head: vk.DeviceSize,
-    AS_scratch_buffer: Buffer_Handle,
-    AS_scratch_size: vk.DeviceSize,
-    AS_required_scratch_size: vk.DeviceSize,
-    AS_queued_build_infos: queue.Queue(AccelerationStructureBuildInfo),
+    AS_buffer: Buffer_Handle,                                               // Stores built acceleration structures
+    AS_head: vk.DeviceSize,                                                 // Points to first free byte in AS_buffer
+    AS_scratch_buffer: Buffer_Handle,                                       // Scratch buffer for AS builds
+    AS_scratch_size: vk.DeviceSize,                                         // Current size of AS_scratch_buffer
+    AS_queued_build_infos: queue.Queue(AccelerationStructureBuildInfo),     // Queue of bottom-level acceleration structures to build this frame
+    AS_required_scratch_size: vk.DeviceSize,                                // Current total scratch size required by queued build infos
 
     // Pipeline layouts used for all pipelines
     gfx_pipeline_layout: vk.PipelineLayout,
@@ -204,7 +204,7 @@ Graphics_Device :: struct {
     // Handle_Maps of all Vulkan objects
     buffers: hm.Handle_Map(Buffer),
     images: hm.Handle_Map(Image),
-    acceleration_structures: hm.Handle_Map(vk.AccelerationStructureKHR),
+    acceleration_structures: hm.Handle_Map(AccelerationStructure),
     semaphores: hm.Handle_Map(vk.Semaphore),
     pipelines: hm.Handle_Map(vk.Pipeline),
 
@@ -1028,6 +1028,8 @@ quit_vulkan :: proc(gd: ^Graphics_Device) {
         cache_file, err := create_write_file(PIPELINE_CACHE)
         if err == nil {
             os.write(cache_file, pipeline_data[:])
+        } else {
+            log.errorf("Error writing pipeline cache file: %v", err)
         }
         os.close(cache_file)
 
@@ -2305,7 +2307,7 @@ submit_compute_command_buffer :: proc(
         commandBufferInfoCount = 1,
         pCommandBufferInfos = &cb_info
     }
-    if vk.QueueSubmit2KHR(gd.compute_queue, 1, &info, 0) != .SUCCESS {
+    if vk.QueueSubmit2(gd.compute_queue, 1, &info, 0) != .SUCCESS {
         log.error("Unable to submit compute command buffer")
     }
 }
@@ -3272,6 +3274,10 @@ create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineI
 
 
 // Acceleration structure section
+AS_BUFFER_ALIGNMENT :: 256
+AccelerationStructure :: struct {
+    handle: vk.AccelerationStructureKHR,
+}
 AccelerationStructureCreateInfo :: struct {
     flags: vk.AccelerationStructureCreateFlagsKHR,
     // buffer: Buffer_Handle,
@@ -3413,13 +3419,15 @@ create_acceleration_structure :: proc(
     if res != .SUCCESS {
         log.errorf("Failed to create acceleration structure: %v", res)
     }
-    gd.AS_head += size_to_alignment(build_sizes.accelerationStructureSize, 256)
+    gd.AS_head += size_to_alignment(build_sizes.accelerationStructureSize, AS_BUFFER_ALIGNMENT)
     build_info.build_scratch_size = build_sizes.buildScratchSize
 
     // Queue build info for per-frame AS building step
     queue.append(&gd.AS_queued_build_infos, build_info^)
 
-    return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, build_info.dst))
+    return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, AccelerationStructure {
+        handle = build_info.dst
+    }))
 }
 
 cmd_build_acceleration_structures :: proc(
