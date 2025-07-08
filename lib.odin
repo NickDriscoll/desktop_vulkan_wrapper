@@ -194,7 +194,7 @@ Graphics_Device :: struct {
     AS_head: vk.DeviceSize,                                                 // Points to first free byte in AS_buffer
     AS_scratch_buffer: Buffer_Handle,                                       // Scratch buffer for AS builds
     AS_scratch_size: vk.DeviceSize,                                         // Current size of AS_scratch_buffer
-    AS_queued_build_infos: queue.Queue(AccelerationStructureBuildInfo),     // Queue of bottom-level acceleration structures to build this frame
+    BLAS_queued_build_infos: queue.Queue(AccelerationStructureBuildInfo),     // Queue of bottom-level acceleration structures to build this frame
     AS_required_scratch_size: vk.DeviceSize,                                // Current total scratch size required by queued build infos
 
     // Pipeline layouts used for all pipelines
@@ -903,7 +903,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         queue.init(&gd.pending_images)
         queue.init(&gd.buffer_deletes)
         queue.init(&gd.image_deletes)
-        queue.init(&gd.AS_queued_build_infos)
+        queue.init(&gd.BLAS_queued_build_infos)
     }
 
     // Create staging buffer
@@ -2236,10 +2236,10 @@ begin_gfx_command_buffer :: proc(
         if len(d_writes) > 0 do vk.UpdateDescriptorSets(gd.device, u32(len(d_writes)), &d_writes[0], 0, nil)
 
         // Build queued acceleration structures
-        if queue.len(gd.AS_queued_build_infos) > 0 {
-            build_infos := make([dynamic]AccelerationStructureBuildInfo, 0, queue.len(gd.AS_queued_build_infos), context.temp_allocator)
-            for queue.len(gd.AS_queued_build_infos) > 0 {
-                as_build_info := queue.pop_front(&gd.AS_queued_build_infos)
+        if queue.len(gd.BLAS_queued_build_infos) > 0 {
+            build_infos := make([dynamic]AccelerationStructureBuildInfo, 0, queue.len(gd.BLAS_queued_build_infos), context.temp_allocator)
+            for queue.len(gd.BLAS_queued_build_infos) > 0 {
+                as_build_info := queue.pop_front(&gd.BLAS_queued_build_infos)
                 append(&build_infos, as_build_info)
             }
             cmd_build_acceleration_structures(gd, build_infos[:])
@@ -3287,7 +3287,7 @@ AccelerationStructureCreateInfo :: struct {
     //device_address: vk.DeviceAddress,     // Only relevant when using the (useless) capture/replay feature
 }
 
-ASTriangleData :: struct {
+ASTrianglesData :: struct {
     vertex_format:  vk.Format,
 	vertex_data:    vk.DeviceOrHostAddressConstKHR,
 	vertex_stride:  vk.DeviceSize,
@@ -3296,8 +3296,13 @@ ASTriangleData :: struct {
 	index_data:     vk.DeviceOrHostAddressConstKHR,
 	transform_data: vk.DeviceOrHostAddressConstKHR,
 }
+ASInstancesData :: struct {
+	array_of_pointers: bool,
+	data:            rawptr,
+}
 AccelerationStructureGeometryData :: union {
-    ASTriangleData,
+    ASTrianglesData,
+    ASInstancesData,
 }
 AccelerationStructureGeometry :: struct {
     type: vk.GeometryTypeKHR,
@@ -3322,7 +3327,7 @@ make_geo_data_structs :: proc(geometries: []AccelerationStructureGeometry) -> [d
     for geo in geometries {
         geo_data: vk.AccelerationStructureGeometryDataKHR
         switch d in geo.geometry {
-            case ASTriangleData: {
+            case ASTrianglesData: {
                 geo_data.triangles = vk.AccelerationStructureGeometryTrianglesDataKHR {
                     sType = .ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
                     pNext = nil,
@@ -3334,7 +3339,16 @@ make_geo_data_structs :: proc(geometries: []AccelerationStructureGeometry) -> [d
                     indexData = d.index_data,
                     transformData = d.transform_data
                 }
-                log.info("correct")
+            }
+            case ASInstancesData: {
+                geo_data.instances = vk.AccelerationStructureGeometryInstancesDataKHR {
+                    sType = .ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+                    pNext = nil,
+                    arrayOfPointers = b32(d.array_of_pointers),
+                    data = {
+                        hostAddress = d.data
+                    }
+                }
             }
             case: {
                 log.error("This should be unreachable")
@@ -3389,7 +3403,7 @@ create_acceleration_structure :: proc(
 
     // If scratch size is larger than current scratch buffer, reallocate scratch buffer
     gd.AS_required_scratch_size += build_sizes.buildScratchSize
-    if gd.AS_scratch_size < gd.AS_required_scratch_size {
+    if create_info.type == .BOTTOM_LEVEL && gd.AS_scratch_size < gd.AS_required_scratch_size {
         delete_buffer(gd, gd.AS_scratch_buffer)
     
         info := Buffer_Info {
@@ -3419,22 +3433,30 @@ create_acceleration_structure :: proc(
     if res != .SUCCESS {
         log.errorf("Failed to create acceleration structure: %v", res)
     }
-    gd.AS_head += size_to_alignment(build_sizes.accelerationStructureSize, AS_BUFFER_ALIGNMENT)
     build_info.build_scratch_size = build_sizes.buildScratchSize
 
     // Queue build info for per-frame AS building step
-    queue.append(&gd.AS_queued_build_infos, build_info^)
+    if create_info.type == .BOTTOM_LEVEL {
+        queue.append(&gd.BLAS_queued_build_infos, build_info^)
+        gd.AS_head += size_to_alignment(build_sizes.accelerationStructureSize, AS_BUFFER_ALIGNMENT)
+    }
 
     return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, AccelerationStructure {
         handle = build_info.dst
     }))
 }
 
+destroy_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> bool {
+    as := hm.get(&gd.acceleration_structures, handle) or_return
+    vk.DestroyAccelerationStructureKHR(gd.device, as.handle, gd.alloc_callbacks)
+    return true
+}
+
 cmd_build_acceleration_structures :: proc(
     gd: ^Graphics_Device,
     infos: []AccelerationStructureBuildInfo
 ) {
-    cb := gd.gfx_command_buffers[in_flight_idx(gd)]
+    cb := gd.gfx_command_buffers[in_flight_idx(gd)]     // @TODO: Use async compute queue instead
     scratch_buffer, _ := get_buffer(gd, gd.AS_scratch_buffer)
 
     g_infos := make([dynamic]vk.AccelerationStructureBuildGeometryInfoKHR, 0, len(infos), context.temp_allocator)
