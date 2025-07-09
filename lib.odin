@@ -212,9 +212,10 @@ Graphics_Device :: struct {
     // but which haven't been transferred to the gfx queue
     pending_images: queue.Queue(Pending_Image),
 
-    // Deletion queues for Buffers and Images
+    // Deletion queues for resources
     buffer_deletes: queue.Queue(Buffer_Delete),
     image_deletes: queue.Queue(Image_Delete),
+    AS_deletes: queue.Queue(AS_Delete),
 
 }
 
@@ -2164,16 +2165,23 @@ begin_gfx_command_buffer :: proc(
         // Process buffer delete queue
         for queue.len(gd.buffer_deletes) > 0 && queue.peek_front(&gd.buffer_deletes).death_frame == gd.frame_count {
             buffer := queue.pop_front(&gd.buffer_deletes)
-            log.debugf("Destroying buffer %s...", buffer.buffer)
+            log.debugf("Destroying buffer %v...", buffer.buffer)
             vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
         }
 
         // Process image delete queue
         for queue.len(gd.image_deletes) > 0 && queue.peek_front(&gd.image_deletes).death_frame == gd.frame_count {
             image := queue.pop_front(&gd.image_deletes)
-            log.debugf("Destroying image %s...", image.image)
+            log.debugf("Destroying image %v...", image.image)
             vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
             vma.destroy_image(gd.allocator, image.image, image.allocation)
+        }
+
+        // Process acceleration structure delete queue
+        for queue.len(gd.AS_deletes) > 0 && queue.peek_front(&gd.AS_deletes).death_frame == gd.frame_count {
+            as := queue.pop_front(&gd.AS_deletes)
+            log.debugf("Destroying acceleration structure %v...", as.handle)
+            vk.DestroyAccelerationStructureKHR(gd.device, as.handle, gd.alloc_callbacks)
         }
 
         d_image_infos := make([dynamic]vk.DescriptorImageInfo, context.temp_allocator)
@@ -3322,6 +3330,11 @@ AccelerationStructureBuildInfo :: struct {
     build_scratch_size: vk.DeviceSize,
 }
 
+AS_Delete :: struct {
+    death_frame: u64,
+    handle: vk.AccelerationStructureKHR,
+}
+
 make_geo_data_structs :: proc(geometries: []AccelerationStructureGeometry) -> [dynamic]vk.AccelerationStructureGeometryKHR {
     geos := make([dynamic]vk.AccelerationStructureGeometryKHR, 0, len(geometries), context.temp_allocator)
     for geo in geometries {
@@ -3446,9 +3459,14 @@ create_acceleration_structure :: proc(
     }))
 }
 
-destroy_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> bool {
+delete_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> bool {
+    // @TODO: This absolutely needs to be buffered like delete_buffer or delete_image
     as := hm.get(&gd.acceleration_structures, handle) or_return
-    vk.DestroyAccelerationStructureKHR(gd.device, as.handle, gd.alloc_callbacks)
+    queue.append(&gd.AS_deletes, AS_Delete {
+        death_frame = gd.frame_count + u64(gd.frames_in_flight),
+        handle = as.handle
+    })
+    hm.remove(&gd.acceleration_structures, handle)
     return true
 }
 
