@@ -22,8 +22,9 @@ MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
 PUSH_CONSTANTS_SIZE :: 128
 STAGING_BUFFER_SIZE :: 16 * 1024 * 1024
 AS_BUFFER_SIZE :: 16 * 1024 * 1024
+TLAS_INSTANCE_BUFFER_SIZE :: 16 * 1024
 
-PIPELINE_CACHE :: ".shadercache"
+PIPELINE_CACHE_FILENAME :: ".shadercache"
 
 create_write_file :: proc(filename: string) -> (os.Handle, os.Error) {
     h: os.Handle
@@ -196,7 +197,8 @@ Graphics_Device :: struct {
     AS_scratch_size: vk.DeviceSize,                                         // Current size of AS_scratch_buffer
     BLAS_queued_build_infos: queue.Queue(AccelerationStructureBuildInfo),     // Queue of bottom-level acceleration structures to build this frame
     AS_required_scratch_size: vk.DeviceSize,                                // Current total scratch size required by queued build infos
-
+    TLAS_instance_buffer: Buffer_Handle,
+    
     // Pipeline layouts used for all pipelines
     gfx_pipeline_layout: vk.PipelineLayout,
     compute_pipeline_layout: vk.PipelineLayout,
@@ -919,7 +921,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         gd.staging_buffer = create_buffer(&gd, &info)
     }
 
-    // Create acceleration structure buffer
+    // Create acceleration structure buffers
     if .Raytracing in params.support_flags {
         info := Buffer_Info {
             size = AS_BUFFER_SIZE,
@@ -929,6 +931,12 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
         gd.AS_buffer = create_buffer(&gd, &info)
 
+        info.size = TLAS_INSTANCE_BUFFER_SIZE
+        info.usage = {.ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,.TRANSFER_DST}
+        info.required_flags += {.HOST_COHERENT,.HOST_VISIBLE}
+        gd.TLAS_instance_buffer = create_buffer(&gd, &info)
+
+        // Set this handle to invalid so that it will be lazily allocated
         gd.AS_scratch_buffer.generation = 0xFFFFFFFF
     }
 
@@ -983,7 +991,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
     // Initialize pipeline cache
     {
         // Check for existance of existing cache
-        pipeline_cache_bytes, cache_exists := os.read_entire_file_from_filename(PIPELINE_CACHE)
+        pipeline_cache_bytes, cache_exists := os.read_entire_file_from_filename(PIPELINE_CACHE_FILENAME)
         data_ptr: rawptr
         data_size: int
         if cache_exists {
@@ -1026,7 +1034,7 @@ quit_vulkan :: proc(gd: ^Graphics_Device) {
             log.errorf("Error getting pipeline cache data: %v", res)
         }
 
-        cache_file, err := create_write_file(PIPELINE_CACHE)
+        cache_file, err := create_write_file(PIPELINE_CACHE_FILENAME)
         if err == nil {
             os.write(cache_file, pipeline_data[:])
         } else {
@@ -3288,11 +3296,7 @@ AccelerationStructure :: struct {
 }
 AccelerationStructureCreateInfo :: struct {
     flags: vk.AccelerationStructureCreateFlagsKHR,
-    // buffer: Buffer_Handle,
-    // offset: vk.DeviceSize,       // Must be multiple of 256
-    // size: vk.DeviceSize,
     type: vk.AccelerationStructureTypeKHR,
-    //device_address: vk.DeviceAddress,     // Only relevant when using the (useless) capture/replay feature
 }
 
 ASTrianglesData :: struct {
@@ -3306,7 +3310,7 @@ ASTrianglesData :: struct {
 }
 ASInstancesData :: struct {
 	array_of_pointers: bool,
-	data:            rawptr,
+	data:            [dynamic]vk.AccelerationStructureInstanceKHR,
 }
 AccelerationStructureGeometryData :: union {
     ASTrianglesData,
@@ -3335,7 +3339,7 @@ AS_Delete :: struct {
     handle: vk.AccelerationStructureKHR,
 }
 
-make_geo_data_structs :: proc(geometries: []AccelerationStructureGeometry) -> [dynamic]vk.AccelerationStructureGeometryKHR {
+make_geo_data_structs :: proc(gd: ^Graphics_Device, geometries: []AccelerationStructureGeometry) -> [dynamic]vk.AccelerationStructureGeometryKHR {
     geos := make([dynamic]vk.AccelerationStructureGeometryKHR, 0, len(geometries), context.temp_allocator)
     for geo in geometries {
         geo_data: vk.AccelerationStructureGeometryDataKHR
@@ -3354,12 +3358,16 @@ make_geo_data_structs :: proc(geometries: []AccelerationStructureGeometry) -> [d
                 }
             }
             case ASInstancesData: {
+                // Copy instance to GPU
+                sync_write_buffer(gd, gd.TLAS_instance_buffer, d.data[:])
+                b, _ := get_buffer(gd, gd.TLAS_instance_buffer)
+
                 geo_data.instances = vk.AccelerationStructureGeometryInstancesDataKHR {
                     sType = .ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
                     pNext = nil,
                     arrayOfPointers = b32(d.array_of_pointers),
                     data = {
-                        hostAddress = d.data
+                        deviceAddress = b.address
                     }
                 }
             }
@@ -3385,7 +3393,7 @@ get_acceleration_structure_build_sizes :: proc(
     size_info: vk.AccelerationStructureBuildSizesInfoKHR
     size_info.sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
 
-    geos := make_geo_data_structs(info.geometries[:])
+    geos := make_geo_data_structs(gd, info.geometries[:])
 
     build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
         sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
@@ -3460,7 +3468,6 @@ create_acceleration_structure :: proc(
 }
 
 delete_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> bool {
-    // @TODO: This absolutely needs to be buffered like delete_buffer or delete_image
     as := hm.get(&gd.acceleration_structures, handle) or_return
     queue.append(&gd.AS_deletes, AS_Delete {
         death_frame = gd.frame_count + u64(gd.frames_in_flight),
@@ -3482,7 +3489,7 @@ cmd_build_acceleration_structures :: proc(
     range_info_ptrs := make([dynamic][^]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     scratch_addr_offset : vk.DeviceAddress = 0
     for info, i in infos {
-        geos := make_geo_data_structs(info.geometries[:])
+        geos := make_geo_data_structs(gd, info.geometries[:])
 
         build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
             sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
