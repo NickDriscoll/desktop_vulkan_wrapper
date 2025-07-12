@@ -2031,7 +2031,7 @@ acquire_swapchain_image :: proc(
 
     // Memory barrier between swapchain acquire and rendering
     swapchain_vkimage, _ := get_image_vkhandle(gd, swapchain_image_handle)
-    cmd_gfx_pipeline_barriers(gd, cb_idx, {
+    cmd_gfx_pipeline_barriers(gd, cb_idx, {}, {
         Image_Barrier {
             src_stage_mask = {.ALL_COMMANDS},
             src_access_mask = {.MEMORY_READ},
@@ -2227,7 +2227,7 @@ begin_gfx_command_buffer :: proc(
                         }
                     }
                 }
-                cmd_gfx_pipeline_barriers(gd, cb_idx, barriers)
+                cmd_gfx_pipeline_barriers(gd, cb_idx, {}, barriers)
 
                 // Save descriptor update data
                 append(&d_image_infos, vk.DescriptorImageInfo {
@@ -2376,7 +2376,7 @@ submit_gfx_and_present :: proc(
 ) -> vk.Result {
     // Memory barrier between rendering to swapchain image and swapchain present
     swapchain_image, _ := get_image_vkhandle(gd, gd.swapchain_images[swapchain_idx^])
-    cmd_gfx_pipeline_barriers(gd, cb_idx, {
+    cmd_gfx_pipeline_barriers(gd, cb_idx, {}, {
         Image_Barrier {
             src_stage_mask = {.COLOR_ATTACHMENT_OUTPUT},
             src_access_mask = {.MEMORY_WRITE},
@@ -2701,9 +2701,27 @@ Image_Barrier :: struct {
 cmd_gfx_pipeline_barriers :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
+    buffer_barriers: []Buffer_Barrier,
     image_barriers: []Image_Barrier
 ) {
     cb := gd.gfx_command_buffers[cb_idx]
+
+    buf_barriers := make([dynamic]vk.BufferMemoryBarrier2, 0, len(buffer_barriers), allocator = context.temp_allocator)
+    for barrier in buffer_barriers {
+        append(&buf_barriers, vk.BufferMemoryBarrier2 {
+            sType = .BUFFER_MEMORY_BARRIER_2,
+            pNext = nil,
+            srcStageMask = barrier.src_stage_mask,
+            srcAccessMask = barrier.src_access_mask,
+            dstStageMask = barrier.dst_stage_mask,
+            dstAccessMask = barrier.dst_access_mask,
+            srcQueueFamilyIndex = barrier.src_queue_family,
+            dstQueueFamilyIndex = barrier.dst_queue_family,
+            buffer = barrier.buffer,
+            offset = barrier.offset,
+            size = barrier.size,
+        })
+    }
 
     im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(image_barriers), context.temp_allocator)
     for barrier in image_barriers {
@@ -2734,8 +2752,8 @@ cmd_gfx_pipeline_barriers :: proc(
         dependencyFlags = nil,
         memoryBarrierCount = 0,
         pMemoryBarriers = nil,
-        bufferMemoryBarrierCount = 0,
-        pBufferMemoryBarriers = nil,
+        bufferMemoryBarrierCount = u32(len(buf_barriers)),
+        pBufferMemoryBarriers = raw_data(buf_barriers),
         imageMemoryBarrierCount = u32(len(im_barriers)),
         pImageMemoryBarriers = raw_data(im_barriers)
     }
@@ -3484,11 +3502,27 @@ cmd_build_acceleration_structures :: proc(
     cb := gd.gfx_command_buffers[in_flight_idx(gd)]     // @TODO: Use async compute queue instead
     scratch_buffer, _ := get_buffer(gd, gd.AS_scratch_buffer)
 
+    
     g_infos := make([dynamic]vk.AccelerationStructureBuildGeometryInfoKHR, 0, len(infos), context.temp_allocator)
     range_infos := make([dynamic]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     range_info_ptrs := make([dynamic][^]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     scratch_addr_offset : vk.DeviceAddress = 0
     for info, i in infos {
+        // Insert appropriate barrier if TLAS
+        if info.type == .TOP_LEVEL {
+            cmd_gfx_pipeline_barriers(gd, CommandBuffer_Index(in_flight_idx(gd)), {
+                {
+                    src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+                    src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
+                    dst_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+                    dst_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
+                    buffer = scratch_buffer.buffer,
+                    offset = 0,
+                    size = vk.DeviceSize(vk.WHOLE_SIZE),
+                }
+            }, {})
+        }
+
         geos := make_geo_data_structs(gd, info.geometries[:])
 
         build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
