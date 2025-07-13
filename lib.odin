@@ -934,6 +934,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         info.size = TLAS_INSTANCE_BUFFER_SIZE
         info.usage = {.ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,.TRANSFER_DST}
         info.required_flags += {.HOST_COHERENT,.HOST_VISIBLE}
+        info.alloc_flags = {.Mapped}
         gd.TLAS_instance_buffer = create_buffer(&gd, &info)
 
         // Set this handle to invalid so that it will be lazily allocated
@@ -1406,7 +1407,7 @@ sync_write_buffer :: proc(
                 signalSemaphoreInfoCount = 1,
                 pSignalSemaphoreInfos = &signal_info
             }
-            if vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
+            if vk.QueueSubmit2(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
                 log.error("Failed to submit to transfer queue.")
             }
 
@@ -1748,7 +1749,7 @@ new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk
         signalSemaphoreInfoCount = 1,
         pSignalSemaphoreInfos = &signal_info
     }
-    res := vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0)
+    res := vk.QueueSubmit2(gd.transfer_queue, 1, &submit_info, 0)
     if res != .SUCCESS {
         log.errorf("Failed to submit to transfer queue: %v", res)
     }
@@ -1951,7 +1952,7 @@ sync_create_image_with_data :: proc(
             signalSemaphoreInfoCount = 1,
             pSignalSemaphoreInfos = &signal_info
         }
-        res := vk.QueueSubmit2KHR(gd.transfer_queue, 1, &submit_info, 0)
+        res := vk.QueueSubmit2(gd.transfer_queue, 1, &submit_info, 0)
         if res != .SUCCESS {
             log.errorf("Failed to submit to transfer queue: %v", res)
         }
@@ -2323,8 +2324,9 @@ submit_compute_command_buffer :: proc(
         commandBufferInfoCount = 1,
         pCommandBufferInfos = &cb_info
     }
-    if vk.QueueSubmit2(gd.compute_queue, 1, &info, 0) != .SUCCESS {
-        log.error("Unable to submit compute command buffer")
+    res := vk.QueueSubmit2(gd.compute_queue, 1, &info, 0)
+    if res != .SUCCESS {
+        log.errorf("Unable to submit compute command buffer: %v", res)
     }
 }
 
@@ -2363,7 +2365,7 @@ submit_gfx_command_buffer :: proc(
         commandBufferInfoCount = 1,
         pCommandBufferInfos = &cb_info
     }
-    if vk.QueueSubmit2KHR(gd.gfx_queue, 1, &info, 0) != .SUCCESS {
+    if vk.QueueSubmit2(gd.gfx_queue, 1, &info, 0) != .SUCCESS {
         log.error("Unable to submit gfx command buffer")
     }
 }
@@ -3499,6 +3501,7 @@ cmd_build_acceleration_structures :: proc(
     gd: ^Graphics_Device,
     infos: []AccelerationStructureBuildInfo
 ) {
+    cb_idx := CommandBuffer_Index(in_flight_idx(gd))
     cb := gd.gfx_command_buffers[in_flight_idx(gd)]     // @TODO: Use async compute queue instead
     scratch_buffer, _ := get_buffer(gd, gd.AS_scratch_buffer)
 
@@ -3510,7 +3513,7 @@ cmd_build_acceleration_structures :: proc(
     for info, i in infos {
         // Insert appropriate barrier if TLAS
         if info.type == .TOP_LEVEL {
-            cmd_gfx_pipeline_barriers(gd, CommandBuffer_Index(in_flight_idx(gd)), {
+            cmd_gfx_pipeline_barriers(gd, cb_idx, {
                 {
                     src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
                     src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
@@ -3550,6 +3553,22 @@ cmd_build_acceleration_structures :: proc(
         append(&range_infos, range_info)
         append(&g_infos, build_info)
         append(&range_info_ptrs, &range_infos[i])
+    }
+
+    // Wait on any previous build commands
+    {
+        as_buffer, _ := get_buffer(gd, gd.AS_buffer)
+        cmd_gfx_pipeline_barriers(gd, cb_idx, {
+            {
+                src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+                src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
+                dst_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+                dst_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
+                buffer = as_buffer.buffer,
+                offset = 0,
+                size = vk.DeviceSize(vk.WHOLE_SIZE),
+            }
+        }, {})
     }
 
     vk.CmdBuildAccelerationStructuresKHR(cb, u32(len(infos)), raw_data(g_infos), raw_data(range_info_ptrs))
