@@ -3487,6 +3487,16 @@ create_acceleration_structure :: proc(
     }))
 }
 
+get_acceleration_structure_address :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> vk.DeviceAddress {
+    blas, _ := hm.get(&gd.acceleration_structures, handle)
+    addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
+        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        pNext = nil,
+        accelerationStructure = blas.handle
+    }
+    return vk.GetAccelerationStructureDeviceAddressKHR(gd.device, &addr_info)
+}
+
 delete_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> bool {
     as := hm.get(&gd.acceleration_structures, handle) or_return
     queue.append(&gd.AS_deletes, AS_Delete {
