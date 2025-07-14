@@ -1122,7 +1122,7 @@ SwapchainInfo :: struct {
     present_mode: vk.PresentModeKHR
 }
 
-window_create_swapchain :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
+window_create_swapchain :: proc(gd: ^Graphics_Device, info: SwapchainInfo) -> bool {
     // surface_caps := 
     // vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gd.physical_device, gd.surface)
 
@@ -1136,8 +1136,8 @@ window_create_swapchain :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> b
         imageFormat = image_format,
         imageColorSpace = .SRGB_NONLINEAR,
         imageExtent = vk.Extent2D {
-            width = new_dims.x,
-            height = new_dims.y
+            width = u32(info.dimensions.x),
+            height = u32(info.dimensions.y)
         },
         imageArrayLayers = 1,
         imageUsage = {.COLOR_ATTACHMENT},
@@ -1146,7 +1146,7 @@ window_create_swapchain :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> b
         pQueueFamilyIndices = &gd.gfx_queue_family,
         preTransform = {.IDENTITY},
         compositeAlpha = {.OPAQUE},
-        presentMode = .FIFO,
+        presentMode = info.present_mode,
         clipped = true,
         oldSwapchain = gd.swapchain
     }
@@ -1232,19 +1232,23 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
     width, height : i32 = 0, 0
     sdl2.Vulkan_GetDrawableSize(window, &width, &height)
 
-    window_create_swapchain(gd, {u32(width), u32(height)}) or_return
+    info := SwapchainInfo {
+        dimensions = {uint(width), uint(height)},
+        present_mode = .FIFO
+    }
+    window_create_swapchain(gd, info) or_return
 
     return true
 }
 
-resize_window :: proc(gd: ^Graphics_Device, new_dims: hlsl.uint2) -> bool {
+resize_window :: proc(gd: ^Graphics_Device, info: SwapchainInfo) -> bool {
     // The graphics device's swapchain should exist
     assert(gd.swapchain != 0)
 
     old_swapchain_handles := make([dynamic]Image_Handle, len(gd.swapchain_images), context.temp_allocator)
     for handle, i in gd.swapchain_images do old_swapchain_handles[i] = handle
 
-    window_create_swapchain(gd, new_dims) or_return
+    window_create_swapchain(gd, info) or_return
 
     // Remove stale swapchain image handles
     for handle in old_swapchain_handles do hm.remove(&gd.images, hm.Handle(handle))
