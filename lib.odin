@@ -384,14 +384,20 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures
                 sync2_features: vk.PhysicalDeviceSynchronization2Features
                 accel_features: vk.PhysicalDeviceAccelerationStructureFeaturesKHR
+                rt_pipeline_features: vk.PhysicalDeviceRayTracingPipelineFeaturesKHR
+                ray_query_features: vk.PhysicalDeviceRayQueryFeaturesKHR
 
                 vulkan_11_features.sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES
                 vulkan_12_features.sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
                 dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
                 sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
                 accel_features.sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR
+                rt_pipeline_features.sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR
+                ray_query_features.sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR
                 features.sType = .PHYSICAL_DEVICE_FEATURES_2
 
+                rt_pipeline_features.pNext = &ray_query_features
+                accel_features.pNext = &rt_pipeline_features
                 vulkan_11_features.pNext = &accel_features
                 vulkan_12_features.pNext = &vulkan_11_features
                 dynamic_rendering_features.pNext = &vulkan_12_features
@@ -403,7 +409,9 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 has_right_features : b32 = true
                 if .Raytracing in params.support_flags {
                     has_right_features = accel_features.accelerationStructure &&
-                                         accel_features.descriptorBindingAccelerationStructureUpdateAfterBind
+                                         accel_features.descriptorBindingAccelerationStructureUpdateAfterBind &&
+                                         rt_pipeline_features.rayTracingPipeline &&
+                                         ray_query_features.rayQuery
 
                     if !has_right_features {
                         gd.support_flags -= {.Raytracing}
@@ -426,7 +434,6 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 }
             }
         }
-
         assert(gd.physical_device != nil, "Didn't find VkPhysicalDevice")
 
         // Query the physical device's queue family properties
@@ -524,7 +531,12 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
         if .Raytracing in params.support_flags {
             gd.support_flags += {.Raytracing}
-            rt_exts : []string = { "VK_KHR_deferred_host_operations", vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME }
+            rt_exts : []string = {
+                "VK_KHR_deferred_host_operations", 
+                vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+                vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+                vk.KHR_RAY_QUERY_EXTENSION_NAME,
+            }
             for ext in rt_exts {
                 if string_contained(supported_extensions[:], ext) {
                     append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
