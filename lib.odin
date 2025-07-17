@@ -415,7 +415,10 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
 
                     if !has_right_features {
                         gd.support_flags -= {.Raytracing}
+                        vulkan_11_features.pNext = nil
                     }
+                } else {
+                    vulkan_11_features.pNext = nil
                 }
 
                 has_right_features =
