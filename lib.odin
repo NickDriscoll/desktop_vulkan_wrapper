@@ -2286,7 +2286,17 @@ begin_gfx_command_buffer :: proc(
     return cb_idx
 }
 
-
+build_queued_blases :: proc(gd: ^Graphics_Device) {
+    if queue.len(gd.BLAS_queued_build_infos) > 0 {
+        build_infos := make([dynamic]AccelerationStructureBuildInfo, 0, queue.len(gd.BLAS_queued_build_infos), context.temp_allocator)
+        for queue.len(gd.BLAS_queued_build_infos) > 0 {
+            as_build_info := queue.pop_front(&gd.BLAS_queued_build_infos)
+            append(&build_infos, as_build_info)
+        }
+        cmd_build_acceleration_structures(gd, build_infos[:])
+        gd.AS_required_scratch_size = 0
+    }
+}
 
 
 
@@ -3339,11 +3349,13 @@ AccelerationStructureCreateInfo :: struct {
 }
 
 ASTrianglesData :: struct {
+    vertex_buffer:  Buffer_Handle,
     vertex_format:  vk.Format,
 	vertex_data:    vk.DeviceOrHostAddressConstKHR,
 	vertex_stride:  vk.DeviceSize,
 	max_vertex:     u32,
 	index_type:     vk.IndexType,
+    index_buffer:   Buffer_Handle,
 	index_data:     vk.DeviceOrHostAddressConstKHR,
 	transform_data: vk.DeviceOrHostAddressConstKHR,
 }
@@ -3540,21 +3552,6 @@ cmd_build_acceleration_structures :: proc(
     range_info_ptrs := make([dynamic][^]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     scratch_addr_offset : vk.DeviceAddress = 0
     for info, i in infos {
-        // Insert appropriate barrier if TLAS
-        if info.type == .TOP_LEVEL {
-            cmd_gfx_pipeline_barriers(gd, cb_idx, {
-                {
-                    src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-                    src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
-                    dst_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-                    dst_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
-                    buffer = scratch_buffer.buffer,
-                    offset = 0,
-                    size = vk.DeviceSize(vk.WHOLE_SIZE),
-                }
-            }, {})
-        }
-
         geos := make_geo_data_structs(gd, info.geometries[:])
 
         build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
@@ -3585,8 +3582,8 @@ cmd_build_acceleration_structures :: proc(
     }
 
     // Wait on any previous build commands
+    as_buffer, _ := get_buffer(gd, gd.AS_buffer)
     {
-        as_buffer, _ := get_buffer(gd, gd.AS_buffer)
         cmd_gfx_pipeline_barriers(gd, cb_idx, {
             {
                 src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
@@ -3596,10 +3593,31 @@ cmd_build_acceleration_structures :: proc(
                 buffer = as_buffer.buffer,
                 offset = 0,
                 size = vk.DeviceSize(vk.WHOLE_SIZE),
+            },
+            {
+                src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+                src_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
+                dst_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+                dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
+                buffer = scratch_buffer.buffer,
+                offset = 0,
+                size = vk.DeviceSize(vk.WHOLE_SIZE),
             }
         }, {})
     }
 
     vk.CmdBuildAccelerationStructuresKHR(cb, u32(len(infos)), raw_data(g_infos), raw_data(range_info_ptrs))
+
+    cmd_gfx_pipeline_barriers(gd, cb_idx, {
+        {
+            src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+            src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
+            dst_stage_mask = {.FRAGMENT_SHADER},
+            dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR},
+            buffer = as_buffer.buffer,
+            offset = 0,
+            size = vk.DeviceSize(vk.WHOLE_SIZE),
+        }
+    }, {})
 }
 
