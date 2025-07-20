@@ -3349,13 +3349,11 @@ AccelerationStructureCreateInfo :: struct {
 }
 
 ASTrianglesData :: struct {
-    vertex_buffer:  Buffer_Handle,
     vertex_format:  vk.Format,
 	vertex_data:    vk.DeviceOrHostAddressConstKHR,
 	vertex_stride:  vk.DeviceSize,
 	max_vertex:     u32,
 	index_type:     vk.IndexType,
-    index_buffer:   Buffer_Handle,
 	index_data:     vk.DeviceOrHostAddressConstKHR,
 	transform_data: vk.DeviceOrHostAddressConstKHR,
 }
