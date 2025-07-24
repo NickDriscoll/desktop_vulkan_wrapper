@@ -56,8 +56,10 @@ size_to_alignment :: proc(size: $T, alignment: T) -> T {
 // As such, we only need descriptor slots for images and samplers
 Bindless_Descriptor_Bindings :: enum u32 {
     Images = 0,
-    Samplers = 1
+    Samplers = 1,
+    AccelerationStructures = 2,
 }
+TOTAL_AS_DESCRIPTORS :: 4
 
 Immutable_Sampler_Index :: enum u32 {
     Aniso16 = 0,
@@ -647,7 +649,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
     }
 
-    // Create command buffer state
+    // Create command pools
     {
         gfx_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
@@ -816,21 +818,28 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             stageFlags = {.FRAGMENT},
             pImmutableSamplers = raw_data(samplers[:])
         }
-        bindings : []vk.DescriptorSetLayoutBinding = {image_binding, sampler_binding}
+        AS_binding := vk.DescriptorSetLayoutBinding {
+            binding = u32(Bindless_Descriptor_Bindings.AccelerationStructures),
+            descriptorType = .ACCELERATION_STRUCTURE_KHR,
+            descriptorCount = TOTAL_AS_DESCRIPTORS,
+            stageFlags = {.FRAGMENT},
+            pImmutableSamplers = raw_data(samplers[:])
+        }
+        bindings : []vk.DescriptorSetLayoutBinding = {image_binding, sampler_binding, AS_binding}
 
         binding_flags : vk.DescriptorBindingFlags = {.PARTIALLY_BOUND,.UPDATE_AFTER_BIND}
-        binding_flags_plural : []vk.DescriptorBindingFlags = {binding_flags,binding_flags}
+        binding_flags_plural : []vk.DescriptorBindingFlags = {binding_flags,binding_flags,binding_flags}
         binding_flags_info := vk.DescriptorSetLayoutBindingFlagsCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
             pNext = nil,
-            bindingCount = 2,
+            bindingCount = len(Bindless_Descriptor_Bindings),
             pBindingFlags = &binding_flags_plural[0]
         }
         layout_info := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             pNext = &binding_flags_info,
             flags = {.UPDATE_AFTER_BIND_POOL},
-            bindingCount = 2,
+            bindingCount = len(Bindless_Descriptor_Bindings),
             pBindings = raw_data(bindings[:])
         }
         if vk.CreateDescriptorSetLayout(gd.device, &layout_info, params.allocation_callbacks, &gd.descriptor_set_layout) != .SUCCESS {
@@ -845,6 +854,10 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             vk.DescriptorPoolSize {
                 type = .SAMPLER,
                 descriptorCount = TOTAL_IMMUTABLE_SAMPLERS
+            },
+            vk.DescriptorPoolSize {
+                type = .ACCELERATION_STRUCTURE_KHR,
+                descriptorCount = TOTAL_AS_DESCRIPTORS
             }
         }
 
@@ -3518,6 +3531,11 @@ create_acceleration_structure :: proc(
     return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, AccelerationStructure {
         handle = build_info.dst
     }))
+}
+
+get_acceleration_structure_handle :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> vk.AccelerationStructureKHR {
+    as, _ := hm.get(&gd.acceleration_structures, handle)
+    return as.handle
 }
 
 get_acceleration_structure_address :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> vk.DeviceAddress {
