@@ -2287,17 +2287,6 @@ begin_gfx_command_buffer :: proc(
 
         // Update sampled image descriptors
         if len(d_writes) > 0 do vk.UpdateDescriptorSets(gd.device, u32(len(d_writes)), &d_writes[0], 0, nil)
-
-        // Build queued acceleration structures
-        if queue.len(gd.BLAS_queued_build_infos) > 0 {
-            build_infos := make([dynamic]AccelerationStructureBuildInfo, 0, queue.len(gd.BLAS_queued_build_infos), context.temp_allocator)
-            for queue.len(gd.BLAS_queued_build_infos) > 0 {
-                as_build_info := queue.pop_front(&gd.BLAS_queued_build_infos)
-                append(&build_infos, as_build_info)
-            }
-            cmd_build_acceleration_structures(gd, build_infos[:])
-            gd.AS_required_scratch_size = 0
-        }
     }
 
     return cb_idx
