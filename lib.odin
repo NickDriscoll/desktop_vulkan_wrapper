@@ -250,7 +250,7 @@ Init_Parameters :: struct {
 
     frames_in_flight: u32,      // Maximum number of command buffers active at once
 
-    support_flags: SupportFlags
+    features: SupportFlags
 }
 
 init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
@@ -296,7 +296,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         log.debugf("Supported instance extensions: %v", supported_extensions)
 
         final_extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
-        if .Window in params.support_flags {
+        if .Window in params.features {
             exts: []string
             when ODIN_OS == .Windows {
                 exts = {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_WIN32_SURFACE_EXTENSION_NAME}
@@ -409,7 +409,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
 
                 // Check for raytracing features
                 has_right_features : b32 = true
-                if .Raytracing in params.support_flags {
+                if .Raytracing in params.features {
                     has_right_features = accel_features.accelerationStructure &&
                                          accel_features.descriptorBindingAccelerationStructureUpdateAfterBind &&
                                          rt_pipeline_features.rayTracingPipeline &&
@@ -525,7 +525,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             }
             append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
         }
-        if .Window in params.support_flags {
+        if .Window in params.features {
             gd.support_flags += {.Window}
             if string_contained(supported_extensions[:], vk.KHR_SWAPCHAIN_EXTENSION_NAME) {
                 append(&final_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
@@ -534,7 +534,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 gd.support_flags -= {.Window}
             }
         }
-        if .Raytracing in params.support_flags {
+        if .Raytracing in params.features {
             gd.support_flags += {.Raytracing}
             rt_exts : []string = {
                 "VK_KHR_deferred_host_operations", 
@@ -954,7 +954,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
     }
 
     // Create acceleration structure buffers
-    if .Raytracing in params.support_flags {
+    if .Raytracing in params.features {
         info := Buffer_Info {
             size = AS_BUFFER_SIZE,
             usage = {.ACCELERATION_STRUCTURE_STORAGE_KHR},
@@ -3590,32 +3590,25 @@ cmd_build_acceleration_structures :: proc(
         append(&range_info_ptrs, &range_infos[i])
     }
 
-    // Wait on any previous build commands
+    // Wait on any previous build commands' access to the
+    // AS buffer and the scratch buffer
     as_buffer, _ := get_buffer(gd, gd.AS_buffer)
     {
         cmd_gfx_pipeline_barriers(gd, cb_idx, {
             {
-                // src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-                // src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
-                // dst_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-                // dst_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
-                src_stage_mask = {.ALL_COMMANDS},
-                src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
-                dst_stage_mask = {.ALL_COMMANDS},
-                dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+                src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+                src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
+                dst_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+                dst_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
                 buffer = as_buffer.buffer,
                 offset = 0,
                 size = vk.DeviceSize(vk.WHOLE_SIZE),
             },
             {
-                // src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-                // src_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
-                // dst_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-                // dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
-                src_stage_mask = {.ALL_COMMANDS},
-                src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
-                dst_stage_mask = {.ALL_COMMANDS},
-                dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+                src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+                src_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
+                dst_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+                dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
                 buffer = scratch_buffer.buffer,
                 offset = 0,
                 size = vk.DeviceSize(vk.WHOLE_SIZE),
@@ -3627,14 +3620,10 @@ cmd_build_acceleration_structures :: proc(
 
     cmd_gfx_pipeline_barriers(gd, cb_idx, {
         {
-            // src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-            // src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
-            // dst_stage_mask = {.FRAGMENT_SHADER},
-            // dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR},
-            src_stage_mask = {.ALL_COMMANDS},
-            src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
-            dst_stage_mask = {.ALL_COMMANDS},
-            dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+            src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+            src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
+            dst_stage_mask = {.FRAGMENT_SHADER},
+            dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR},
             buffer = as_buffer.buffer,
             offset = 0,
             size = vk.DeviceSize(vk.WHOLE_SIZE),
