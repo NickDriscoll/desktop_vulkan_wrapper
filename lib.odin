@@ -3367,7 +3367,7 @@ AccelerationStructureBuildInfo :: struct {
     type: vk.AccelerationStructureTypeKHR,
     flags: vk.BuildAccelerationStructureFlagsKHR,
     mode: vk.BuildAccelerationStructureModeKHR,
-    src: vk.AccelerationStructureKHR,
+    src: Acceleration_Structure_Handle,
     dst: vk.AccelerationStructureKHR,
     geometries: [dynamic]AccelerationStructureGeometry,
     prim_counts: []u32,
@@ -3443,8 +3443,8 @@ get_acceleration_structure_build_sizes :: proc(
         type = info.type,
         flags = info.flags,
         mode = info.mode,
-        srcAccelerationStructure = info.src,
-        dstAccelerationStructure = info.dst,
+        // srcAccelerationStructure = info.src,
+        // dstAccelerationStructure = info.dst,
         geometryCount = u32(len(geos)),
         pGeometries = raw_data(geos),
         ppGeometries = nil,
@@ -3482,7 +3482,21 @@ create_acceleration_structure :: proc(
     }
 
     as_buffer, _ := get_buffer(gd, gd.AS_buffer)
+
     offset := gd.AS_head
+    saved_offset := offset
+    src_AS, have_src := get_acceleration_structure(gd, build_info.src)
+    if have_src {
+        saved_offset = vk.DeviceSize(src_AS.offset)
+        first_location := gd.frame_count % 2 == 0
+        if first_location {
+            offset = saved_offset
+        } else {
+            offset = saved_offset + build_sizes.accelerationStructureSize
+        }
+        offset = size_to_alignment(build_sizes.accelerationStructureSize, AS_BUFFER_ALIGNMENT)
+    }
+
     info := vk.AccelerationStructureCreateInfoKHR {
         sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
         pNext = nil,
@@ -3502,18 +3516,23 @@ create_acceleration_structure :: proc(
     // Queue build info for per-frame AS building step
     if create_info.type == .BOTTOM_LEVEL {
         queue.append(&gd.BLAS_queued_build_infos, build_info^)
-        gd.AS_head += size_to_alignment(build_sizes.accelerationStructureSize, AS_BUFFER_ALIGNMENT)
+        aligned_size := size_to_alignment(build_sizes.accelerationStructureSize, AS_BUFFER_ALIGNMENT)
+        if .ALLOW_UPDATE in build_info.flags {
+            // Double the reserved size for the AS in the case where we allow update
+            aligned_size *= 2
+        }
+        gd.AS_head += aligned_size
     }
 
     return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, AccelerationStructure {
         handle = build_info.dst,
-        offset = u32(offset)
+        offset = u32(saved_offset)
     }))
 }
 
-get_acceleration_structure_handle :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> vk.AccelerationStructureKHR {
-    as, _ := hm.get(&gd.acceleration_structures, handle)
-    return as.handle
+get_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> (^AccelerationStructure, bool) {
+    as, b := hm.get(&gd.acceleration_structures, handle)
+    return as, b
 }
 
 get_acceleration_structure_address :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> vk.DeviceAddress {
@@ -3564,13 +3583,19 @@ cmd_build_acceleration_structures :: proc(
     for info, i in infos {
         geos := make_geo_data_structs(gd, info.geometries[:])
 
+        src, have_src := get_acceleration_structure(gd, info.src)
+        src_handle : vk.AccelerationStructureKHR = 0
+        if have_src {
+            src_handle = src.handle
+        }
+
         build_info := vk.AccelerationStructureBuildGeometryInfoKHR {
             sType = .ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
             pNext = nil,
             type = info.type,
             flags = info.flags,
             mode = info.mode,
-            srcAccelerationStructure = info.src,
+            srcAccelerationStructure = src_handle,
             dstAccelerationStructure = info.dst,
             geometryCount = u32(len(geos)),
             pGeometries = raw_data(geos),
@@ -3623,7 +3648,7 @@ cmd_build_acceleration_structures :: proc(
         {
             src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
             src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
-            dst_stage_mask = {.FRAGMENT_SHADER},
+            dst_stage_mask = {.FRAGMENT_SHADER,.ACCELERATION_STRUCTURE_BUILD_KHR},
             dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR},
             buffer = as_buffer.buffer,
             offset = 0,
