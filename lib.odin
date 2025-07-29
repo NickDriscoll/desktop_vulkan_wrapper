@@ -2292,20 +2292,6 @@ begin_gfx_command_buffer :: proc(
     return cb_idx
 }
 
-build_queued_blases :: proc(gd: ^Graphics_Device) {
-    if queue.len(gd.BLAS_queued_build_infos) > 0 {
-        build_infos := make([dynamic]AccelerationStructureBuildInfo, 0, queue.len(gd.BLAS_queued_build_infos), context.temp_allocator)
-        for queue.len(gd.BLAS_queued_build_infos) > 0 {
-            as_build_info := queue.pop_front(&gd.BLAS_queued_build_infos)
-            append(&build_infos, as_build_info)
-        }
-        cmd_build_acceleration_structures(gd, build_infos[:])
-        gd.AS_required_scratch_size = 0
-    }
-}
-
-
-
 build_submit_infos :: proc(
     gd: ^Graphics_Device,
     submit_infos: ^[dynamic]vk.SemaphoreSubmitInfoKHR,
@@ -3348,6 +3334,7 @@ create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineI
 AS_BUFFER_ALIGNMENT :: 256
 AccelerationStructure :: struct {
     handle: vk.AccelerationStructureKHR,
+    offset: u32,
 }
 AccelerationStructureCreateInfo :: struct {
     flags: vk.AccelerationStructureCreateFlagsKHR,
@@ -3495,12 +3482,13 @@ create_acceleration_structure :: proc(
     }
 
     as_buffer, _ := get_buffer(gd, gd.AS_buffer)
+    offset := gd.AS_head
     info := vk.AccelerationStructureCreateInfoKHR {
         sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
         pNext = nil,
         createFlags = create_info.flags,
         buffer = as_buffer.buffer,
-        offset = vk.DeviceSize(gd.AS_head),
+        offset = offset,
         size = build_sizes.accelerationStructureSize,
         type = create_info.type,
         //deviceAddress = info.device_address           // Only relevant when using the (useless) capture/replay feature
@@ -3518,7 +3506,8 @@ create_acceleration_structure :: proc(
     }
 
     return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, AccelerationStructure {
-        handle = build_info.dst
+        handle = build_info.dst,
+        offset = u32(offset)
     }))
 }
 
@@ -3545,6 +3534,18 @@ delete_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration
     })
     hm.remove(&gd.acceleration_structures, handle)
     return true
+}
+
+build_queued_blases :: proc(gd: ^Graphics_Device) {
+    if queue.len(gd.BLAS_queued_build_infos) > 0 {
+        build_infos := make([dynamic]AccelerationStructureBuildInfo, 0, queue.len(gd.BLAS_queued_build_infos), context.temp_allocator)
+        for queue.len(gd.BLAS_queued_build_infos) > 0 {
+            as_build_info := queue.pop_front(&gd.BLAS_queued_build_infos)
+            append(&build_infos, as_build_info)
+        }
+        cmd_build_acceleration_structures(gd, build_infos[:])
+        gd.AS_required_scratch_size = 0
+    }
 }
 
 cmd_build_acceleration_structures :: proc(
