@@ -3483,51 +3483,48 @@ create_acceleration_structure :: proc(
 
     as_buffer, _ := get_buffer(gd, gd.AS_buffer)
 
-    offset := gd.AS_head
-    saved_offset := offset
     src_AS, have_src := get_acceleration_structure(gd, build_info.src)
+    ret_handle: Acceleration_Structure_Handle
     if have_src {
-        saved_offset = vk.DeviceSize(src_AS.offset)
-        first_location := gd.frame_count % 2 == 0
-        if first_location {
-            offset = saved_offset
-        } else {
-            offset = saved_offset + build_sizes.accelerationStructureSize
+        build_info.mode = .UPDATE
+        build_info.dst = src_AS.handle
+        ret_handle = build_info.src
+    } else {
+        offset := gd.AS_head
+        info := vk.AccelerationStructureCreateInfoKHR {
+            sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+            pNext = nil,
+            createFlags = create_info.flags,
+            buffer = as_buffer.buffer,
+            offset = offset,
+            size = build_sizes.accelerationStructureSize,
+            type = create_info.type,
+            //deviceAddress = info.device_address           // Only relevant when using the (useless) capture/replay feature
         }
-        offset = size_to_alignment(build_sizes.accelerationStructureSize, AS_BUFFER_ALIGNMENT)
+        res := vk.CreateAccelerationStructureKHR(gd.device, &info, gd.alloc_callbacks, &build_info.dst)
+        if res != .SUCCESS {
+            log.errorf("Failed to create acceleration structure: %v", res)
+        }
+
+        if create_info.type == .BOTTOM_LEVEL {
+            aligned_size := size_to_alignment(build_sizes.accelerationStructureSize, AS_BUFFER_ALIGNMENT)
+            gd.AS_head += aligned_size
+        }
+
+        ret_handle = Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, AccelerationStructure {
+            handle = build_info.dst,
+            offset = u32(offset)
+        }))
     }
 
-    info := vk.AccelerationStructureCreateInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        pNext = nil,
-        createFlags = create_info.flags,
-        buffer = as_buffer.buffer,
-        offset = offset,
-        size = build_sizes.accelerationStructureSize,
-        type = create_info.type,
-        //deviceAddress = info.device_address           // Only relevant when using the (useless) capture/replay feature
-    }
-    res := vk.CreateAccelerationStructureKHR(gd.device, &info, gd.alloc_callbacks, &build_info.dst)
-    if res != .SUCCESS {
-        log.errorf("Failed to create acceleration structure: %v", res)
-    }
     build_info.build_scratch_size = build_sizes.buildScratchSize
 
     // Queue build info for per-frame AS building step
     if create_info.type == .BOTTOM_LEVEL {
         queue.append(&gd.BLAS_queued_build_infos, build_info^)
-        aligned_size := size_to_alignment(build_sizes.accelerationStructureSize, AS_BUFFER_ALIGNMENT)
-        if .ALLOW_UPDATE in build_info.flags {
-            // Double the reserved size for the AS in the case where we allow update
-            aligned_size *= 2
-        }
-        gd.AS_head += aligned_size
     }
 
-    return Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, AccelerationStructure {
-        handle = build_info.dst,
-        offset = u32(saved_offset)
-    }))
+    return ret_handle
 }
 
 get_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> (^AccelerationStructure, bool) {
