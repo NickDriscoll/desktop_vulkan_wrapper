@@ -826,20 +826,24 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             pImmutableSamplers = raw_data(samplers[:])
         }
         bindings : []vk.DescriptorSetLayoutBinding = {image_binding, sampler_binding, AS_binding}
+        bindings_count : u32 = 2
+        if .Raytracing in gd.support_flags {
+            bindings_count += 1
+        }
 
         binding_flags : vk.DescriptorBindingFlags = {.PARTIALLY_BOUND,.UPDATE_AFTER_BIND}
         binding_flags_plural : []vk.DescriptorBindingFlags = {binding_flags,binding_flags,binding_flags}
         binding_flags_info := vk.DescriptorSetLayoutBindingFlagsCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
             pNext = nil,
-            bindingCount = len(Bindless_Descriptor_Bindings),
+            bindingCount = bindings_count,
             pBindingFlags = &binding_flags_plural[0]
         }
         layout_info := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             pNext = &binding_flags_info,
             flags = {.UPDATE_AFTER_BIND_POOL},
-            bindingCount = len(Bindless_Descriptor_Bindings),
+            bindingCount = bindings_count,
             pBindings = raw_data(bindings[:])
         }
         if vk.CreateDescriptorSetLayout(gd.device, &layout_info, params.allocation_callbacks, &gd.descriptor_set_layout) != .SUCCESS {
@@ -866,7 +870,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             pNext = nil,
             flags = {.UPDATE_AFTER_BIND},
             maxSets = 1,
-            poolSizeCount = u32(len(sizes)),
+            poolSizeCount = bindings_count,
             pPoolSizes = raw_data(sizes[:])
         }
         if vk.CreateDescriptorPool(gd.device, &pool_info, params.allocation_callbacks, &gd.descriptor_pool) != .SUCCESS {
