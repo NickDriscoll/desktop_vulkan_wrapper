@@ -975,6 +975,13 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
 
         // Set this handle to invalid so that it will be lazily allocated
         gd.AS_scratch_buffer.generation = 0xFFFFFFFF
+
+        // Put dummy acceleration in slot 0 so that {index = 0, generation = 0}
+        // Will always be a null AS
+        unused := hm.insert(&gd.acceleration_structures, AccelerationStructure {
+            handle = 0,
+            offset = 0
+        })
     }
 
     // Create transfer timeline semaphore
@@ -1417,6 +1424,7 @@ sync_write_buffer :: proc(
                 size = vk.DeviceSize(iter_size)
             }
             vk.CmdCopyBuffer(cb, sb.buffer, out_buf.buffer, 1, &buffer_copy)
+
             vk.EndCommandBuffer(cb)
 
             // Actually submit this lonesome command to the transfer queue
@@ -1757,7 +1765,7 @@ new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk
             }
         }
     }
-    cmd_transfer_pipeline_barriers(gd, cb_idx, barriers)
+    cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
 
     vk.EndCommandBuffer(cb)
 
@@ -1895,7 +1903,7 @@ sync_create_image_with_data :: proc(
                     }
                 }
             }
-            cmd_transfer_pipeline_barriers(gd, cb_idx, barriers)
+            cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
         }
 
         min_blocksize := u32(vk_format_block_size(create_info.format))
@@ -1959,7 +1967,7 @@ sync_create_image_with_data :: proc(
                     }
                 }
             }
-            cmd_transfer_pipeline_barriers(gd, cb_idx, barriers)
+            cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
         }
 
         vk.EndCommandBuffer(cb)
@@ -2856,9 +2864,27 @@ cmd_compute_pipeline_barriers :: proc(
 cmd_transfer_pipeline_barriers :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
+    buffer_barriers: []Buffer_Barrier,
     image_barriers: []Image_Barrier
 ) {
     cb := gd.transfer_command_buffers[cb_idx]
+
+    buf_barriers := make([dynamic]vk.BufferMemoryBarrier2, 0, len(buffer_barriers), allocator = context.temp_allocator)
+    for barrier in buffer_barriers {
+        append(&buf_barriers, vk.BufferMemoryBarrier2 {
+            sType = .BUFFER_MEMORY_BARRIER_2,
+            pNext = nil,
+            srcStageMask = barrier.src_stage_mask,
+            srcAccessMask = barrier.src_access_mask,
+            dstStageMask = barrier.dst_stage_mask,
+            dstAccessMask = barrier.dst_access_mask,
+            srcQueueFamilyIndex = barrier.src_queue_family,
+            dstQueueFamilyIndex = barrier.dst_queue_family,
+            buffer = barrier.buffer,
+            offset = barrier.offset,
+            size = barrier.size,
+        })
+    }
 
     im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(image_barriers), context.temp_allocator)
     for barrier in image_barriers {
@@ -2889,8 +2915,8 @@ cmd_transfer_pipeline_barriers :: proc(
         dependencyFlags = nil,
         memoryBarrierCount = 0,
         pMemoryBarriers = nil,
-        bufferMemoryBarrierCount = 0,
-        pBufferMemoryBarriers = nil,
+        bufferMemoryBarrierCount = u32(len(buf_barriers)),
+        pBufferMemoryBarriers = raw_data(buf_barriers),
         imageMemoryBarrierCount = u32(len(im_barriers)),
         pImageMemoryBarriers = raw_data(im_barriers)
     }
@@ -3489,7 +3515,7 @@ create_acceleration_structure :: proc(
 
     src_AS, have_src := get_acceleration_structure(gd, build_info.src)
     ret_handle: Acceleration_Structure_Handle
-    if have_src {
+    if have_src && src_AS.handle != 0 {
         build_info.mode = .UPDATE
         build_info.dst = src_AS.handle
         ret_handle = build_info.src
@@ -3647,10 +3673,14 @@ cmd_build_acceleration_structures :: proc(
 
     cmd_gfx_pipeline_barriers(gd, cb_idx, {
         {
-            src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-            src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
-            dst_stage_mask = {.FRAGMENT_SHADER,.ACCELERATION_STRUCTURE_BUILD_KHR},
-            dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR},
+            // src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+            // src_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
+            // dst_stage_mask = {.FRAGMENT_SHADER,.ACCELERATION_STRUCTURE_BUILD_KHR,.TRANSFER},
+            // dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.TRANSFER_WRITE},
+            src_stage_mask = {.ALL_COMMANDS},
+            src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+            dst_stage_mask = {.ALL_COMMANDS},
+            dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
             buffer = as_buffer.buffer,
             offset = 0,
             size = vk.DeviceSize(vk.WHOLE_SIZE),
