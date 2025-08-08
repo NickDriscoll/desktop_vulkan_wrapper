@@ -1334,7 +1334,7 @@ create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Ha
         flags = nil,
         size = buf_info.size,
         usage = buf_info.usage + {.SHADER_DEVICE_ADDRESS},
-        sharingMode = .CONCURRENT,          // @TODO: Actually evaluate if concurrent buffers on desktop are fine
+        sharingMode = .CONCURRENT,
         queueFamilyIndexCount = u32(len(qfis)),
         pQueueFamilyIndices = raw_data(qfis[:])
     }
