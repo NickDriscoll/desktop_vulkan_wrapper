@@ -293,7 +293,6 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         vk.EnumerateInstanceExtensionProperties(nil, &ext_count, nil)
         supported_extensions := make([dynamic]vk.ExtensionProperties, ext_count, context.temp_allocator)
         vk.EnumerateInstanceExtensionProperties(nil, &ext_count, raw_data(supported_extensions))
-        log.debugf("Supported instance extensions: %v", supported_extensions)
 
         final_extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
         if .Window in params.features {
@@ -376,7 +375,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             props.pNext = &vk12_props
             vk.GetPhysicalDeviceProperties2(pd, &props)
 
-            log.debugf("Considering physical device:\n%v", string_from_bytes(props.properties.deviceName[:]))
+            log.debugf("Considering physical device:\t%v", string_from_bytes(props.properties.deviceName[:]))
 
             // @TODO: Do something more sophisticated than picking the first DISCRETE_GPU
             if props.properties.deviceType == .DISCRETE_GPU {
@@ -458,10 +457,8 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
         gd.compute_queue_family = gd.gfx_queue_family
         gd.transfer_queue_family = gd.gfx_queue_family
-        log.debug("Queue family profile flags...")
         for qfp, i in qfps {
             flags := qfp.queueFamilyProperties.queueFlags
-            log.debugf("%#v", qfp.queueFamilyProperties.queueFlags)
 
             if .COMPUTE&.TRANSFER in flags {
                 gd.compute_queue_family = u32(i)
@@ -3516,10 +3513,14 @@ create_acceleration_structure :: proc(
     src_AS, have_src := get_acceleration_structure(gd, build_info.src)
     ret_handle: Acceleration_Structure_Handle
     if have_src && src_AS.handle != 0 {
+        // AS already exists and we're updating it
+
         build_info.mode = .UPDATE
         build_info.dst = src_AS.handle
         ret_handle = build_info.src
     } else {
+        // AS does not exist yet
+        
         offset := gd.AS_head
         info := vk.AccelerationStructureCreateInfoKHR {
             sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
@@ -3612,7 +3613,7 @@ cmd_build_acceleration_structures :: proc(
 
         src, have_src := get_acceleration_structure(gd, info.src)
         src_handle : vk.AccelerationStructureKHR = 0
-        if have_src {
+        if have_src && src.handle != 0 {
             src_handle = src.handle
         }
 
