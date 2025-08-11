@@ -3674,14 +3674,10 @@ cmd_build_acceleration_structures :: proc(
 
     cmd_gfx_pipeline_barriers(gd, cb_idx, {
         {
-            // src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
-            // src_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
-            // dst_stage_mask = {.FRAGMENT_SHADER,.ACCELERATION_STRUCTURE_BUILD_KHR,.TRANSFER},
-            // dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.TRANSFER_WRITE},
-            src_stage_mask = {.ALL_COMMANDS},
-            src_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
-            dst_stage_mask = {.ALL_COMMANDS},
-            dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+            src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
+            src_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
+            dst_stage_mask = {.FRAGMENT_SHADER,.ACCELERATION_STRUCTURE_BUILD_KHR,.TRANSFER},
+            dst_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.TRANSFER_WRITE},
             buffer = as_buffer.buffer,
             offset = 0,
             size = vk.DeviceSize(vk.WHOLE_SIZE),
