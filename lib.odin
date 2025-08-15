@@ -86,35 +86,35 @@ Semaphore_Op :: struct {
     value: u64
 }
 
-Sync_Info :: struct {
+SyncInfo :: struct {
     wait_ops: [dynamic]Semaphore_Op,
     signal_ops: [dynamic]Semaphore_Op,
 }
 
-sync_init :: proc(s: ^Sync_Info) {
+sync_init :: proc(s: ^SyncInfo) {
     s.wait_ops = make([dynamic]Semaphore_Op)
     s.signal_ops = make([dynamic]Semaphore_Op)
 }
 
-add_wait_op :: proc(gd: ^Graphics_Device, i: ^Sync_Info, handle: Semaphore_Handle, value : u64 = 0) {
+add_wait_op :: proc(gd: ^Graphics_Device, i: ^SyncInfo, handle: Semaphore_Handle, value : u64 = 0) {
     append(&i.wait_ops, Semaphore_Op {
         semaphore = handle,
         value = value
     })
 }
-add_signal_op :: proc(gd: ^Graphics_Device, i: ^Sync_Info, handle: Semaphore_Handle, value : u64 = 0) {
+add_signal_op :: proc(gd: ^Graphics_Device, i: ^SyncInfo, handle: Semaphore_Handle, value : u64 = 0) {
     append(&i.signal_ops, Semaphore_Op {
         semaphore = handle,
         value = value
     })
 }
 
-delete_sync_info :: proc(s: ^Sync_Info) {
+delete_sync_info :: proc(s: ^SyncInfo) {
     delete(s.wait_ops)
     delete(s.signal_ops)
 }
 
-clear_sync_info :: proc(s: ^Sync_Info) {
+clear_sync_info :: proc(s: ^SyncInfo) {
     clear(&s.wait_ops)
     clear(&s.signal_ops)
 }
@@ -1353,7 +1353,7 @@ create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Ha
         pNext = nil,
         buffer = b.buffer
     }
-    b.address = vk.GetBufferDeviceAddressKHR(gd.device, &bda_info)
+    b.address = vk.GetBufferDeviceAddress(gd.device, &bda_info)
 
     if len(buf_info.name) > 0 {
         assign_debug_name(gd.device, .BUFFER, u64(b.buffer), strings.unsafe_string_to_cstring(buf_info.name))
@@ -1375,13 +1375,13 @@ sync_write_buffer :: proc(
     gd: ^Graphics_Device,
     out_buffer: Buffer_Handle,
     in_slice: []$Element_Type,
-    base_offset : u32 = 0
+    base_offset : u32 = 0,
+    sync: SyncInfo = {}
 ) -> bool {
     if len(in_slice) == 0 do return false
 
     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
     out_buf := get_buffer(gd, out_buffer) or_return
-    semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
     in_bytes : []byte = slice.from_ptr(cast([^]byte)slice.as_ptr(in_slice), len(in_slice) * size_of(Element_Type))
     base_offset_bytes := base_offset * size_of(Element_Type)
 
@@ -1432,15 +1432,25 @@ sync_write_buffer :: proc(
                 deviceMask = 0
             }
 
-            // Increment transfer timeline counter
-            new_timeline_value := gd.transfers_completed + 1
-            signal_info := vk.SemaphoreSubmitInfo {
-                sType = .SEMAPHORE_SUBMIT_INFO,
-                pNext = nil,
-                semaphore = semaphore^,
-                value = new_timeline_value,
-                stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
-                deviceIndex = 0
+            // Honor sync info
+            wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.wait_ops), allocator = context.temp_allocator)
+            signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.signal_ops), allocator = context.temp_allocator)
+            {
+                build_submit_infos(gd, &wait_infos, sync.wait_ops)
+                build_submit_infos(gd, &signal_infos, sync.signal_ops)
+
+                // Increment transfer timeline counter
+                semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+                new_timeline_value := gd.transfers_completed + 1
+                signal_info := vk.SemaphoreSubmitInfo {
+                    sType = .SEMAPHORE_SUBMIT_INFO,
+                    pNext = nil,
+                    semaphore = semaphore^,
+                    value = new_timeline_value,
+                    stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+                    deviceIndex = 0
+                }
+                append(&signal_infos, signal_info)
             }
 
             submit_info := vk.SubmitInfo2 {
@@ -1449,14 +1459,20 @@ sync_write_buffer :: proc(
                 flags = nil,
                 commandBufferInfoCount = 1,
                 pCommandBufferInfos = &cb_info,
-                signalSemaphoreInfoCount = 1,
-                pSignalSemaphoreInfos = &signal_info
+                waitSemaphoreInfoCount = u32(len(wait_infos)),
+                pWaitSemaphoreInfos = raw_data(wait_infos),
+                signalSemaphoreInfoCount = u32(len(signal_infos)),
+                pSignalSemaphoreInfos = raw_data(signal_infos)
             }
             if vk.QueueSubmit2(gd.transfer_queue, 1, &submit_info, 0) != .SUCCESS {
                 log.error("Failed to submit to transfer queue.")
             }
 
             // CPU wait
+            // @TODO: Should be able to get rid of this wait by having
+            // gfx queue wait on transfer timeline semaphore
+            semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+            new_timeline_value := gd.transfers_completed + 1
             wait_info := vk.SemaphoreWaitInfo {
                 sType = .SEMAPHORE_WAIT_INFO,
                 pNext = nil,
@@ -2053,7 +2069,7 @@ delete_image :: proc(gd: ^Graphics_Device, handle: Image_Handle) -> bool {
 acquire_swapchain_image :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
-    sync: ^Sync_Info,
+    sync: ^SyncInfo,
 ) -> (image_idx: u32, res: vk.Result) {
     idx := in_flight_idx(gd)
     sem, sem_ok := get_semaphore(gd, gd.acquire_semaphores[idx])
@@ -2304,7 +2320,7 @@ begin_gfx_command_buffer :: proc(
 build_submit_infos :: proc(
     gd: ^Graphics_Device,
     submit_infos: ^[dynamic]vk.SemaphoreSubmitInfoKHR,
-    semaphore_ops: ^[dynamic]Semaphore_Op
+    semaphore_ops: [dynamic]Semaphore_Op
 ) -> bool {
     count := len(semaphore_ops)
     for i := 0; i < count; i += 1 {
@@ -2324,7 +2340,7 @@ build_submit_infos :: proc(
 submit_compute_command_buffer :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
-    sync: ^Sync_Info
+    sync: ^SyncInfo
 ) {
     cb := gd.compute_command_buffers[cb_idx]
     if vk.EndCommandBuffer(cb) != .SUCCESS {
@@ -2340,8 +2356,8 @@ submit_compute_command_buffer :: proc(
 
     wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.wait_ops), allocator = context.temp_allocator)
     signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.signal_ops), allocator = context.temp_allocator)
-    build_submit_infos(gd, &wait_infos, &sync.wait_ops)
-    build_submit_infos(gd, &signal_infos, &sync.signal_ops)
+    build_submit_infos(gd, &wait_infos, sync.wait_ops)
+    build_submit_infos(gd, &signal_infos, sync.signal_ops)
 
     info := vk.SubmitInfo2 {
         sType = .SUBMIT_INFO_2,
@@ -2363,7 +2379,7 @@ submit_compute_command_buffer :: proc(
 submit_gfx_command_buffer :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
-    sync: ^Sync_Info
+    sync: ^SyncInfo
 ) {
     cb := gd.gfx_command_buffers[cb_idx]
     if vk.EndCommandBuffer(cb) != .SUCCESS {
@@ -2380,9 +2396,8 @@ submit_gfx_command_buffer :: proc(
     // Make semaphore submit infos
     wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.wait_ops), allocator = context.temp_allocator)
     signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.signal_ops), allocator = context.temp_allocator)
-
-    build_submit_infos(gd, &wait_infos, &sync.wait_ops)
-    build_submit_infos(gd, &signal_infos, &sync.signal_ops)
+    build_submit_infos(gd, &wait_infos, sync.wait_ops)
+    build_submit_infos(gd, &signal_infos, sync.signal_ops)
 
     info := vk.SubmitInfo2{
         sType = .SUBMIT_INFO_2_KHR,
@@ -2403,7 +2418,7 @@ submit_gfx_command_buffer :: proc(
 submit_gfx_and_present :: proc(
     gd: ^Graphics_Device,
     cb_idx: CommandBuffer_Index,
-    sync: ^Sync_Info,
+    sync: ^SyncInfo,
     swapchain_idx: ^u32
 ) -> vk.Result {
     // Memory barrier between rendering to swapchain image and swapchain present
@@ -3601,7 +3616,10 @@ cmd_build_acceleration_structures :: proc(
 ) {
     cb_idx := CommandBuffer_Index(in_flight_idx(gd))
     cb := gd.gfx_command_buffers[in_flight_idx(gd)]     // @TODO: Use async compute queue instead
-    scratch_buffer, _ := get_buffer(gd, gd.AS_scratch_buffer)
+    scratch_buffer, ok := get_buffer(gd, gd.AS_scratch_buffer)
+    if !ok {
+        log.error("Couldn't get scratch buffer.")
+    }
 
     
     g_infos := make([dynamic]vk.AccelerationStructureBuildGeometryInfoKHR, 0, len(infos), context.temp_allocator)
