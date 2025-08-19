@@ -3506,22 +3506,8 @@ create_acceleration_structure :: proc(
     assert(.Raytracing in gd.support_flags)
     build_sizes := get_acceleration_structure_build_sizes(gd, build_info^)
 
-    // If scratch size is larger than current scratch buffer, reallocate scratch buffer
+    // Record new required scratch buffer size
     gd.AS_required_scratch_size += build_sizes.buildScratchSize
-    if create_info.type == .BOTTOM_LEVEL && gd.AS_scratch_size < gd.AS_required_scratch_size {
-        delete_buffer(gd, gd.AS_scratch_buffer)
-    
-        info := Buffer_Info {
-            size = gd.AS_required_scratch_size,
-            usage = {.STORAGE_BUFFER},
-            required_flags = {.DEVICE_LOCAL},
-            name = "Acceleration structure scratch buffer",
-        }
-        gd.AS_scratch_buffer = create_buffer(gd, &info)
-        gd.AS_scratch_size += gd.AS_required_scratch_size
-
-        log.warnf("Resized acceleration structure scratch buffer to %v bytes.", gd.AS_scratch_size)
-    }
 
     as_buffer, _ := get_buffer(gd, gd.AS_buffer)
 
@@ -3616,12 +3602,28 @@ cmd_build_acceleration_structures :: proc(
 ) {
     cb_idx := CommandBuffer_Index(in_flight_idx(gd))
     cb := gd.gfx_command_buffers[in_flight_idx(gd)]     // @TODO: Use async compute queue instead
+
+    // If scratch size is larger than current scratch buffer, reallocate scratch buffer
+    if gd.AS_scratch_size < gd.AS_required_scratch_size {
+        delete_buffer(gd, gd.AS_scratch_buffer)
+    
+        info := Buffer_Info {
+            size = gd.AS_required_scratch_size,
+            usage = {.STORAGE_BUFFER},
+            required_flags = {.DEVICE_LOCAL},
+            name = "Acceleration structure scratch buffer",
+        }
+        gd.AS_scratch_buffer = create_buffer(gd, &info)
+        gd.AS_scratch_size = gd.AS_required_scratch_size
+
+        log.warnf("Resized acceleration structure scratch buffer to %v bytes.", gd.AS_scratch_size)
+    }
+
     scratch_buffer, ok := get_buffer(gd, gd.AS_scratch_buffer)
     if !ok {
         log.error("Couldn't get scratch buffer.")
     }
 
-    
     g_infos := make([dynamic]vk.AccelerationStructureBuildGeometryInfoKHR, 0, len(infos), context.temp_allocator)
     range_infos := make([dynamic]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
     range_info_ptrs := make([dynamic][^]vk.AccelerationStructureBuildRangeInfoKHR, 0, len(infos), context.temp_allocator)
