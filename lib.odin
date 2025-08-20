@@ -3079,6 +3079,8 @@ Pipeline_Handle :: distinct hm.Handle
 GraphicsPipelineInfo :: struct {
     vertex_shader_bytecode: []u32,
     fragment_shader_bytecode: []u32,
+    vertex_spec_constants: []i32,
+    fragment_spec_constants: []i32,
     input_assembly_state: Input_Assembly_State,
     tessellation_state: Tessellation_State,
     rasterization_state: Rasterization_State,
@@ -3115,6 +3117,8 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
     colorblend_attachments := make([dynamic]vk.PipelineColorBlendAttachmentState, pipeline_count, context.temp_allocator)
     colorblend_states := make([dynamic]vk.PipelineColorBlendStateCreateInfo, pipeline_count, context.temp_allocator)
     renderpass_states := make([dynamic]vk.PipelineRenderingCreateInfo, pipeline_count, context.temp_allocator)
+    spec_map_entries := make([dynamic]vk.SpecializationMapEntry, context.temp_allocator)
+    spec_infos := make([dynamic]vk.SpecializationInfo, context.temp_allocator)
 
     dynamic_states : [2]vk.DynamicState = {.VIEWPORT,.SCISSOR}
 
@@ -3148,12 +3152,31 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
     }
 
     // Make create infos
+    spec_constant_offset := 0
     for info, i in infos {
-        using info
-
         // Shader state
-        shader_modules[2 * i] =     create_shader_module(gd, vertex_shader_bytecode)
-        shader_modules[2 * i + 1] = create_shader_module(gd, fragment_shader_bytecode)
+        shader_modules[2 * i]     = create_shader_module(gd, info.vertex_shader_bytecode)
+        shader_modules[2 * i + 1] = create_shader_module(gd, info.fragment_shader_bytecode)
+
+        vertex_spec_ptr : ^vk.SpecializationInfo = nil
+        if len(info.vertex_spec_constants) > 0 {
+            for constant, j in info.vertex_spec_constants {
+                append(&spec_map_entries, vk.SpecializationMapEntry {
+                    constantID = u32(j),
+                    offset = u32(size_of(i32) * j),
+                    size = size_of(i32)
+                })
+            }
+            vertex_spec_info := vk.SpecializationInfo {
+                mapEntryCount = u32(len(info.vertex_spec_constants)),
+                pMapEntries = &spec_map_entries[spec_constant_offset],
+                dataSize = size_of(i32) * len(info.vertex_spec_constants),
+                pData = raw_data(info.vertex_spec_constants)
+            }
+            append(&spec_infos, vertex_spec_info)
+            spec_constant_offset += len(info.vertex_spec_constants)
+            vertex_spec_ptr = &spec_infos[len(spec_infos) - 1]
+        }
         shader_infos[2 * i] = vk.PipelineShaderStageCreateInfo {
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
             pNext = nil,
@@ -3161,7 +3184,27 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
             stage = {.VERTEX},
             module = shader_modules[2 * i],
             pName = "main",
-            pSpecializationInfo = nil
+            pSpecializationInfo = vertex_spec_ptr
+        }
+
+        fragment_spec_ptr : ^vk.SpecializationInfo = nil
+        if len(info.fragment_spec_constants) > 0 {
+            for constant, j in info.fragment_spec_constants {
+                append(&spec_map_entries, vk.SpecializationMapEntry {
+                    constantID = u32(j),
+                    offset = u32(size_of(i32) * j),
+                    size = size_of(i32)
+                })
+            }
+            fragment_spec_info := vk.SpecializationInfo {
+                mapEntryCount = u32(len(info.fragment_spec_constants)),
+                pMapEntries = &spec_map_entries[spec_constant_offset],
+                dataSize = size_of(i32) * len(info.fragment_spec_constants),
+                pData = raw_data(info.fragment_spec_constants)
+            }
+            append(&spec_infos, fragment_spec_info)
+            spec_constant_offset += len(info.fragment_spec_constants)
+            fragment_spec_ptr = &spec_infos[len(spec_infos) - 1]
         }
         shader_infos[2 * i + 1] = vk.PipelineShaderStageCreateInfo {
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -3170,7 +3213,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
             stage = {.FRAGMENT},
             module = shader_modules[2 * i + 1],
             pName = "main",
-            pSpecializationInfo = nil
+            pSpecializationInfo = fragment_spec_ptr
         }
 
         // Input assembly state
@@ -3178,15 +3221,15 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
             sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             pNext = nil,
             flags = nil,
-            topology = input_assembly_state.topology,
-            primitiveRestartEnable = b32(input_assembly_state.primitive_restart_enabled)
+            topology = info.input_assembly_state.topology,
+            primitiveRestartEnable = b32(info.input_assembly_state.primitive_restart_enabled)
         }
 
         // Tessellation state
         tessellation_states[i] = vk.PipelineTessellationStateCreateInfo {
             sType = .PIPELINE_TESSELLATION_STATE_CREATE_INFO,
             pNext = nil,
-            patchControlPoints = tessellation_state.patch_control_points
+            patchControlPoints = info.tessellation_state.patch_control_points
         }
 
         // Rasterization state
@@ -3194,27 +3237,27 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
             sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             pNext = nil,
             flags = nil,
-            depthClampEnable = b32(rasterization_state.do_depth_clamp),
-            rasterizerDiscardEnable = b32(rasterization_state.do_rasterizer_discard),
-            polygonMode = rasterization_state.polygon_mode,
-            cullMode = rasterization_state.cull_mode,
-            frontFace = rasterization_state.front_face,
-            depthBiasEnable = b32(rasterization_state.do_depth_bias),
-            depthBiasConstantFactor = rasterization_state.depth_bias_constant_factor,
-            depthBiasClamp = rasterization_state.depth_bias_clamp,
-            depthBiasSlopeFactor = rasterization_state.depth_bias_slope_factor,
-            lineWidth = rasterization_state.line_width
+            depthClampEnable = b32(info.rasterization_state.do_depth_clamp),
+            rasterizerDiscardEnable = b32(info.rasterization_state.do_rasterizer_discard),
+            polygonMode = info.rasterization_state.polygon_mode,
+            cullMode = info.rasterization_state.cull_mode,
+            frontFace = info.rasterization_state.front_face,
+            depthBiasEnable = b32(info.rasterization_state.do_depth_bias),
+            depthBiasConstantFactor = info.rasterization_state.depth_bias_constant_factor,
+            depthBiasClamp = info.rasterization_state.depth_bias_clamp,
+            depthBiasSlopeFactor = info.rasterization_state.depth_bias_slope_factor,
+            lineWidth = info.rasterization_state.line_width
         }
 
         // Multisample state
-        sample_masks[i] = multisample_state.sample_mask
+        sample_masks[i] = info.multisample_state.sample_mask
         multisample_states[i] = vk.PipelineMultisampleStateCreateInfo {
             sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             pNext = nil,
             flags = nil,
-            rasterizationSamples = multisample_state.sample_count,
-            sampleShadingEnable = b32(multisample_state.do_sample_shading),
-            minSampleShading = multisample_state.min_sample_shading,
+            rasterizationSamples = info.multisample_state.sample_count,
+            sampleShadingEnable = b32(info.multisample_state.do_sample_shading),
+            minSampleShading = info.multisample_state.min_sample_shading,
             pSampleMask = sample_masks[i]
         }
 
@@ -3222,37 +3265,37 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
         depthstencil_states[i] = vk.PipelineDepthStencilStateCreateInfo {
             sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             pNext = nil,
-            flags = depthstencil_state.flags,
-            depthTestEnable = b32(depthstencil_state.do_depth_test),
-            depthWriteEnable = b32(depthstencil_state.do_depth_write),
-            depthCompareOp = depthstencil_state.depth_compare_op,
-            depthBoundsTestEnable = b32(depthstencil_state.do_depth_bounds_test),
-            stencilTestEnable = b32(depthstencil_state.do_stencil_test),
-            front = depthstencil_state.front,
-            back = depthstencil_state.back,
-            minDepthBounds = depthstencil_state.min_depth_bounds,
-            maxDepthBounds = depthstencil_state.max_depth_bounds
+            flags = info.depthstencil_state.flags,
+            depthTestEnable = b32(info.depthstencil_state.do_depth_test),
+            depthWriteEnable = b32(info.depthstencil_state.do_depth_write),
+            depthCompareOp = info.depthstencil_state.depth_compare_op,
+            depthBoundsTestEnable = b32(info.depthstencil_state.do_depth_bounds_test),
+            stencilTestEnable = b32(info.depthstencil_state.do_stencil_test),
+            front = info.depthstencil_state.front,
+            back = info.depthstencil_state.back,
+            minDepthBounds = info.depthstencil_state.min_depth_bounds,
+            maxDepthBounds = info.depthstencil_state.max_depth_bounds
         }
 
         // Color blend state
         colorblend_attachments[i] = vk.PipelineColorBlendAttachmentState {
-            blendEnable = b32(colorblend_state.attachment.do_blend),
-            srcColorBlendFactor = colorblend_state.attachment.src_color_blend_factor,
-            dstColorBlendFactor = colorblend_state.attachment.dst_color_blend_factor,
-            colorBlendOp = colorblend_state.attachment.color_blend_op,
-            srcAlphaBlendFactor = colorblend_state.attachment.src_alpha_blend_factor,
-            dstAlphaBlendFactor = colorblend_state.attachment.dst_alpha_blend_factor,
-            alphaBlendOp = colorblend_state.attachment.alpha_blend_op,
-            colorWriteMask = colorblend_state.attachment.color_write_mask
+            blendEnable = b32(info.colorblend_state.attachment.do_blend),
+            srcColorBlendFactor = info.colorblend_state.attachment.src_color_blend_factor,
+            dstColorBlendFactor = info.colorblend_state.attachment.dst_color_blend_factor,
+            colorBlendOp = info.colorblend_state.attachment.color_blend_op,
+            srcAlphaBlendFactor = info.colorblend_state.attachment.src_alpha_blend_factor,
+            dstAlphaBlendFactor = info.colorblend_state.attachment.dst_alpha_blend_factor,
+            alphaBlendOp = info.colorblend_state.attachment.alpha_blend_op,
+            colorWriteMask = info.colorblend_state.attachment.color_write_mask
         }
         colorblend_states[i] = vk.PipelineColorBlendStateCreateInfo {
             sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             pNext = nil,
-            flags = colorblend_state.flags,
-            logicOpEnable = b32(colorblend_state.do_logic_op),
+            flags = info.colorblend_state.flags,
+            logicOpEnable = b32(info.colorblend_state.do_logic_op),
             attachmentCount = 1,
             pAttachments = &colorblend_attachments[i],
-            blendConstants = cast([4]f32)colorblend_state.blend_constants
+            blendConstants = cast([4]f32)info.colorblend_state.blend_constants
         }
 
         // Render pass state
@@ -3260,9 +3303,9 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
             sType = .PIPELINE_RENDERING_CREATE_INFO,
             pNext = nil,
             viewMask = 0,
-            colorAttachmentCount = u32(len(renderpass_state.color_attachment_formats)),
-            pColorAttachmentFormats = raw_data(renderpass_state.color_attachment_formats),
-            depthAttachmentFormat = renderpass_state.depth_attachment_format,
+            colorAttachmentCount = u32(len(info.renderpass_state.color_attachment_formats)),
+            pColorAttachmentFormats = raw_data(info.renderpass_state.color_attachment_formats),
+            depthAttachmentFormat = info.renderpass_state.depth_attachment_format,
             stencilAttachmentFormat = nil
         }
 
