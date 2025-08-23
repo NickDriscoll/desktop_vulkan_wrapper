@@ -453,7 +453,9 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         // Determine available queue family types
         for qfp, i in qfps {
             flags := qfp.queueFamilyProperties.queueFlags
-            if vk.QueueFlag.GRAPHICS in flags do gd.gfx_queue_family = u32(i)
+            if vk.QueueFlag.GRAPHICS in flags {
+                gd.gfx_queue_family = u32(i)
+            }
         }
         gd.compute_queue_family = gd.gfx_queue_family
         gd.transfer_queue_family = gd.gfx_queue_family
@@ -463,9 +465,11 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             if .COMPUTE&.TRANSFER in flags {
                 gd.compute_queue_family = u32(i)
                 gd.transfer_queue_family = u32(i)
+            } else if vk.QueueFlag.COMPUTE in flags {
+                gd.compute_queue_family = u32(i)
+            } else if vk.QueueFlag.TRANSFER in flags {
+                gd.transfer_queue_family = u32(i)
             }
-            else if vk.QueueFlag.COMPUTE in flags do gd.compute_queue_family = u32(i)
-            else if vk.QueueFlag.TRANSFER in flags do gd.transfer_queue_family = u32(i)
         }
 
         queue_priority : f32 = 1.0
@@ -575,28 +579,6 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
 
     //Load proc addrs that come from the device driver
     vk.load_proc_addresses_device(gd.device)
-
-    // Drivers won't report a function with e.g. a KHR suffix if it has
-    // been promoted to core in the requested Vulkan version which is super annoying
-    {
-        if vk.QueueSubmit2 == nil do vk.QueueSubmit2 = vk.QueueSubmit2KHR
-        if vk.QueueSubmit2KHR == nil do vk.QueueSubmit2KHR = vk.QueueSubmit2
-
-        if vk.CmdBeginRendering == nil do vk.CmdBeginRendering = vk.CmdBeginRenderingKHR
-        if vk.CmdBeginRenderingKHR == nil do vk.CmdBeginRenderingKHR = vk.CmdBeginRendering
-
-        if vk.CmdEndRendering == nil do vk.CmdEndRendering = vk.CmdEndRenderingKHR
-        if vk.CmdEndRenderingKHR == nil do vk.CmdEndRenderingKHR = vk.CmdEndRendering
-
-        if vk.CmdPipelineBarrier2 == nil do vk.CmdPipelineBarrier2 = vk.CmdPipelineBarrier2KHR
-        if vk.CmdPipelineBarrier2KHR == nil do vk.CmdPipelineBarrier2KHR = vk.CmdPipelineBarrier2
-
-        if vk.WaitSemaphores == nil do vk.WaitSemaphores = vk.WaitSemaphoresKHR
-        if vk.WaitSemaphoresKHR == nil do vk.WaitSemaphoresKHR = vk.WaitSemaphores
-
-        if vk.GetBufferDeviceAddress == nil do vk.GetBufferDeviceAddress = vk.GetBufferDeviceAddressKHR
-        if vk.GetBufferDeviceAddressKHR == nil do vk.GetBufferDeviceAddressKHR = vk.GetBufferDeviceAddress
-    }
 
     // Initialize the Vulkan Memory Allocator
     {
@@ -1286,12 +1268,16 @@ resize_window :: proc(gd: ^Graphics_Device, info: SwapchainInfo) -> bool {
     assert(gd.swapchain != 0)
 
     old_swapchain_handles := make([dynamic]Image_Handle, len(gd.swapchain_images), context.temp_allocator)
-    for handle, i in gd.swapchain_images do old_swapchain_handles[i] = handle
+    for handle, i in gd.swapchain_images {
+        old_swapchain_handles[i] = handle
+    }
 
     window_create_swapchain(gd, info) or_return
 
     // Remove stale swapchain image handles
-    for handle in old_swapchain_handles do hm.remove(&gd.images, hm.Handle(handle))
+    for handle in old_swapchain_handles {
+        hm.remove(&gd.images, hm.Handle(handle))
+    }
 
     return true
 }
@@ -1378,7 +1364,9 @@ sync_write_buffer :: proc(
     base_offset : u32 = 0,
     sync: SyncInfo = {}
 ) -> bool {
-    if len(in_slice) == 0 do return false
+    if len(in_slice) == 0 {
+        return false
+    }
 
     cb := gd.transfer_command_buffers[in_flight_idx(gd)]
     out_buf := get_buffer(gd, out_buffer) or_return
@@ -1756,7 +1744,9 @@ new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk
     })
 
     semaphore, ok2 := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline))
-    if !ok2 do log.error("Error getting transfer timeline semaphore")
+    if !ok2 {
+        log.error("Error getting transfer timeline semaphore")
+    }
 
     barriers := []Image_Barrier {
         {
@@ -2155,7 +2145,9 @@ begin_compute_command_buffer :: proc(
         // CPU-sync to prevent CPU from getting further ahead than
         // the number of frames in flight
         sem, ok := get_semaphore(gd, timeline_semaphore)
-        if !ok do log.error("Couldn't find semaphore for CPU-sync")
+        if !ok {
+            log.error("Couldn't find semaphore for CPU-sync")
+        }
         info := vk.SemaphoreWaitInfo {
             sType = .SEMAPHORE_WAIT_INFO,
             pNext = nil,
@@ -2201,7 +2193,9 @@ begin_gfx_command_buffer :: proc(
         // CPU-sync to prevent CPU from getting further ahead than
         // the number of frames in flight
         sem, ok := get_semaphore(gd, timeline_semaphore)
-        if !ok do log.error("Couldn't find semaphore for CPU-sync")
+        if !ok {
+            log.error("Couldn't find semaphore for CPU-sync")
+        }
         info := vk.SemaphoreWaitInfo {
             sType = .SEMAPHORE_WAIT_INFO,
             pNext = nil,
@@ -2311,7 +2305,9 @@ begin_gfx_command_buffer :: proc(
         }
 
         // Update sampled image descriptors
-        if len(d_writes) > 0 do vk.UpdateDescriptorSets(gd.device, u32(len(d_writes)), &d_writes[0], 0, nil)
+        if len(d_writes) > 0 {
+            vk.UpdateDescriptorSets(gd.device, u32(len(d_writes)), &d_writes[0], 0, nil)
+        }
     }
 
     return cb_idx
@@ -2527,7 +2523,7 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
     }
 
 
-    vk.CmdBeginRenderingKHR(cb, &info)
+    vk.CmdBeginRendering(cb, &info)
 }
 
 cmd_bind_gfx_descriptor_set :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
@@ -2657,7 +2653,7 @@ cmd_draw_indexed_indirect :: proc(
 
 cmd_end_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
     cb := gd.gfx_command_buffers[cb_idx]
-    vk.CmdEndRenderingKHR(cb)
+    vk.CmdEndRendering(cb)
 }
 
 Semaphore_Info :: struct {
@@ -2804,7 +2800,7 @@ cmd_gfx_pipeline_barriers :: proc(
         imageMemoryBarrierCount = u32(len(im_barriers)),
         pImageMemoryBarriers = raw_data(im_barriers)
     }
-    vk.CmdPipelineBarrier2KHR(cb, &info)
+    vk.CmdPipelineBarrier2(cb, &info)
 }
 
 // Inserts an arbitrary number of memory barriers
@@ -2868,7 +2864,7 @@ cmd_compute_pipeline_barriers :: proc(
         imageMemoryBarrierCount = u32(len(im_barriers)),
         pImageMemoryBarriers = raw_data(im_barriers)
     }
-    vk.CmdPipelineBarrier2KHR(cb, &info)
+    vk.CmdPipelineBarrier2(cb, &info)
 }
 
 // Inserts an arbitrary number of memory barriers
@@ -2932,7 +2928,7 @@ cmd_transfer_pipeline_barriers :: proc(
         imageMemoryBarrierCount = u32(len(im_barriers)),
         pImageMemoryBarriers = raw_data(im_barriers)
     }
-    vk.CmdPipelineBarrier2KHR(cb, &info)
+    vk.CmdPipelineBarrier2(cb, &info)
 }
 
 
