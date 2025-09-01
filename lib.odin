@@ -2180,35 +2180,8 @@ begin_compute_command_buffer :: proc(
 }
 
 begin_gfx_command_buffer :: proc(
-    gd: ^Graphics_Device,
-    timeline_semaphore: Semaphore_Handle
+    gd: ^Graphics_Device
 ) -> CommandBuffer_Index {
-
-
-    // Sync point where we wait if there are already N frames in the gfx queue
-    if gd.frame_count >= u64(gd.frames_in_flight) {
-        // Wait on timeline semaphore before starting command buffer execution
-        wait_value := gd.frame_count - u64(gd.frames_in_flight) + 1
-
-        // CPU-sync to prevent CPU from getting further ahead than
-        // the number of frames in flight
-        sem, ok := get_semaphore(gd, timeline_semaphore)
-        if !ok {
-            log.error("Couldn't find semaphore for CPU-sync")
-        }
-        info := vk.SemaphoreWaitInfo {
-            sType = .SEMAPHORE_WAIT_INFO,
-            pNext = nil,
-            flags = nil,
-            semaphoreCount = 1,
-            pSemaphores = sem,
-            pValues = &wait_value
-        }
-        res := vk.WaitSemaphores(gd.device, &info, max(u64))
-        if res != .SUCCESS {
-            log.errorf("CPU failed to wait for timeline semaphore: %v", res)
-        }
-    }
 
     cb_idx := CommandBuffer_Index(gd.next_gfx_command_buffer)
     gd.next_gfx_command_buffer = (gd.next_gfx_command_buffer + 1) % gd.frames_in_flight
