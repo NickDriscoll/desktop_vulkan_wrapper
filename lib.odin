@@ -3128,6 +3128,7 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
     spec_constant_offset := 0
     for info, i in infos {
         // Shader state
+        log.debugf("Create shader modules for %v", info.name)
         shader_modules[2 * i]     = create_shader_module(gd, info.vertex_shader_bytecode)
         shader_modules[2 * i + 1] = create_shader_module(gd, info.fragment_shader_bytecode)
 
