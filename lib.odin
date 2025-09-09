@@ -361,80 +361,84 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         phys_devices := make([dynamic]vk.PhysicalDevice, phys_device_count, context.temp_allocator)
         vk.EnumeratePhysicalDevices(gd.instance, &phys_device_count, raw_data(phys_devices))
 
+        preferred_device_types : []vk.PhysicalDeviceType = {.DISCRETE_GPU,.INTEGRATED_GPU}
+
         // Select the physical device to use
         // @NOTE: We only support using a single physical device at once
         features: vk.PhysicalDeviceFeatures2
-        for pd in phys_devices {
-            // Query this physical device's properties
-            vk12_props: vk.PhysicalDeviceVulkan12Properties
-            props: vk.PhysicalDeviceProperties2
+        outer: for device_type in preferred_device_types {
+            for pd in phys_devices {
+                // Query this physical device's properties
+                vk12_props: vk.PhysicalDeviceVulkan12Properties
+                props: vk.PhysicalDeviceProperties2
+    
+                vk12_props.sType = .PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES
+                props.sType = .PHYSICAL_DEVICE_PROPERTIES_2
+    
+                props.pNext = &vk12_props
+                vk.GetPhysicalDeviceProperties2(pd, &props)
+    
+                // @TODO: Do something more sophisticated than picking the first device of a preferred type
+                if props.properties.deviceType == device_type {
+                    log.debugf("Considering physical device:\t%v", string_from_bytes(props.properties.deviceName[:]))
 
-            vk12_props.sType = .PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES
-            props.sType = .PHYSICAL_DEVICE_PROPERTIES_2
-
-            props.pNext = &vk12_props
-            vk.GetPhysicalDeviceProperties2(pd, &props)
-
-            log.debugf("Considering physical device:\t%v", string_from_bytes(props.properties.deviceName[:]))
-
-            // @TODO: Do something more sophisticated than picking the first DISCRETE_GPU
-            if props.properties.deviceType == .DISCRETE_GPU {
-                // Check physical device features
-                vulkan_11_features: vk.PhysicalDeviceVulkan11Features
-                vulkan_12_features: vk.PhysicalDeviceVulkan12Features
-                dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures
-                sync2_features: vk.PhysicalDeviceSynchronization2Features
-                accel_features: vk.PhysicalDeviceAccelerationStructureFeaturesKHR
-                rt_pipeline_features: vk.PhysicalDeviceRayTracingPipelineFeaturesKHR
-                ray_query_features: vk.PhysicalDeviceRayQueryFeaturesKHR
-
-                vulkan_11_features.sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES
-                vulkan_12_features.sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
-                dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
-                sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
-                accel_features.sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR
-                rt_pipeline_features.sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR
-                ray_query_features.sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR
-                features.sType = .PHYSICAL_DEVICE_FEATURES_2
-
-                rt_pipeline_features.pNext = &ray_query_features
-                accel_features.pNext = &rt_pipeline_features
-                vulkan_11_features.pNext = &accel_features
-                vulkan_12_features.pNext = &vulkan_11_features
-                dynamic_rendering_features.pNext = &vulkan_12_features
-                sync2_features.pNext = &dynamic_rendering_features
-                features.pNext = &sync2_features
-                vk.GetPhysicalDeviceFeatures2(pd, &features)
-
-                // Check for raytracing features
-                has_right_features : b32 = true
-                if .Raytracing in params.features {
-                    has_right_features = accel_features.accelerationStructure &&
-                                         accel_features.descriptorBindingAccelerationStructureUpdateAfterBind &&
-                                         rt_pipeline_features.rayTracingPipeline &&
-                                         ray_query_features.rayQuery
-
-                    if !has_right_features {
-                        gd.support_flags -= {.Raytracing}
+                    // Check physical device features
+                    vulkan_11_features: vk.PhysicalDeviceVulkan11Features
+                    vulkan_12_features: vk.PhysicalDeviceVulkan12Features
+                    dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures
+                    sync2_features: vk.PhysicalDeviceSynchronization2Features
+                    accel_features: vk.PhysicalDeviceAccelerationStructureFeaturesKHR
+                    rt_pipeline_features: vk.PhysicalDeviceRayTracingPipelineFeaturesKHR
+                    ray_query_features: vk.PhysicalDeviceRayQueryFeaturesKHR
+    
+                    vulkan_11_features.sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES
+                    vulkan_12_features.sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+                    dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
+                    sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
+                    accel_features.sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR
+                    rt_pipeline_features.sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR
+                    ray_query_features.sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR
+                    features.sType = .PHYSICAL_DEVICE_FEATURES_2
+    
+                    rt_pipeline_features.pNext = &ray_query_features
+                    accel_features.pNext = &rt_pipeline_features
+                    vulkan_11_features.pNext = &accel_features
+                    vulkan_12_features.pNext = &vulkan_11_features
+                    dynamic_rendering_features.pNext = &vulkan_12_features
+                    sync2_features.pNext = &dynamic_rendering_features
+                    features.pNext = &sync2_features
+                    vk.GetPhysicalDeviceFeatures2(pd, &features)
+    
+                    // Check for raytracing features
+                    has_right_features : b32 = true
+                    if .Raytracing in params.features {
+                        has_right_features = accel_features.accelerationStructure &&
+                                             accel_features.descriptorBindingAccelerationStructureUpdateAfterBind &&
+                                             rt_pipeline_features.rayTracingPipeline &&
+                                             ray_query_features.rayQuery
+    
+                        if !has_right_features {
+                            gd.support_flags -= {.Raytracing}
+                            vulkan_11_features.pNext = nil
+                        }
+                    } else {
                         vulkan_11_features.pNext = nil
                     }
-                } else {
-                    vulkan_11_features.pNext = nil
-                }
-
-                has_right_features =
-                    vulkan_11_features.variablePointers &&
-                    vulkan_12_features.descriptorIndexing &&
-                    vulkan_12_features.runtimeDescriptorArray &&
-                    vulkan_12_features.timelineSemaphore &&
-                    vulkan_12_features.bufferDeviceAddress && 
-                    dynamic_rendering_features.dynamicRendering &&
-                    sync2_features.synchronization2 
-                if has_right_features {
-                    gd.physical_device = pd
-                    gd.physical_device_properties = props
-                    log.infof("Chosen GPU: %s", string_from_bytes(props.properties.deviceName[:]))
-                    break
+    
+                    has_right_features =
+                        vulkan_11_features.variablePointers &&
+                        vulkan_12_features.descriptorIndexing &&
+                        vulkan_12_features.runtimeDescriptorArray &&
+                        vulkan_12_features.timelineSemaphore &&
+                        vulkan_12_features.bufferDeviceAddress && 
+                        dynamic_rendering_features.dynamicRendering &&
+                        sync2_features.synchronization2 
+                    if has_right_features {
+                        gd.physical_device = pd
+                        gd.physical_device_properties = props
+                        log.infof("Chosen GPU: %s", string_from_bytes(props.properties.deviceName[:]))
+                        break outer
+                    }
                 }
             }
         }
@@ -980,7 +984,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         tex_data: [size*size*4]u8
         for i := 0; i < len(tex_data); i += 4 {
             pixel_idx := i/4
-            is_odd : int = (pixel_idx / 16) % 2 == 1
+            is_odd : int = int((pixel_idx / 16) % 2 == 1)
             result: u8 = 0xFF if (pixel_idx) % 2 == is_odd else 0x00
             tex_data[i] = result
             tex_data[i + 1] = 0x0
@@ -2200,14 +2204,14 @@ begin_gfx_command_buffer :: proc(
     // Do per-frame that has to happen for any gfx command buffer
     {
         // Process buffer delete queue
-        for queue.len(gd.buffer_deletes) > 0 && queue.peek_front(&gd.buffer_deletes).death_frame == gd.frame_count {
+        for queue.len(gd.buffer_deletes) > 0 && queue.front_ptr(&gd.buffer_deletes).death_frame == gd.frame_count {
             buffer := queue.pop_front(&gd.buffer_deletes)
             log.debugf("Destroying buffer %v...", buffer.buffer)
             vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
         }
 
         // Process image delete queue
-        for queue.len(gd.image_deletes) > 0 && queue.peek_front(&gd.image_deletes).death_frame == gd.frame_count {
+        for queue.len(gd.image_deletes) > 0 && queue.front_ptr(&gd.image_deletes).death_frame == gd.frame_count {
             image := queue.pop_front(&gd.image_deletes)
             log.debugf("Destroying image %v...", image.image)
             vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
@@ -2215,7 +2219,7 @@ begin_gfx_command_buffer :: proc(
         }
 
         // Process acceleration structure delete queue
-        for queue.len(gd.AS_deletes) > 0 && queue.peek_front(&gd.AS_deletes).death_frame == gd.frame_count {
+        for queue.len(gd.AS_deletes) > 0 && queue.front_ptr(&gd.AS_deletes).death_frame == gd.frame_count {
             as := queue.pop_front(&gd.AS_deletes)
             log.debugf("Destroying acceleration structure %v...", as.handle)
             vk.DestroyAccelerationStructureKHR(gd.device, as.handle, gd.alloc_callbacks)
