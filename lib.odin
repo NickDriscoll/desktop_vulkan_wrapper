@@ -539,10 +539,10 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 gd.support_flags -= {.Window}
             }
         }
-        if .Raytracing in params.features {
+        if .Raytracing in gd.support_flags {
             gd.support_flags += {.Raytracing}
             rt_exts : []string = {
-                "VK_KHR_deferred_host_operations", 
+                vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
                 vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
                 vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
                 vk.KHR_RAY_QUERY_EXTENSION_NAME,
@@ -551,6 +551,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 if !string_contained(supported_extensions[:], ext) {
                     log.errorf("Requested raytracing support but %v was not found", ext)
                     gd.support_flags -= {.Raytracing}
+                    break
                 }
             }
 
@@ -941,7 +942,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
     }
 
     // Create acceleration structure buffers
-    if .Raytracing in params.features {
+    if .Raytracing in gd.support_flags {
         info := Buffer_Info {
             size = AS_BUFFER_SIZE,
             usage = {.ACCELERATION_STRUCTURE_STORAGE_KHR},
@@ -3042,7 +3043,8 @@ create_shader_module :: proc(gd: ^Graphics_Device, code: []u32) -> vk.ShaderModu
         pCode = raw_data(code)
     }
     mod: vk.ShaderModule
-    if vk.CreateShaderModule(gd.device, &info, gd.alloc_callbacks, &mod) != .SUCCESS {
+    p_info := &info
+    if vk.CreateShaderModule(gd.device, p_info, gd.alloc_callbacks, &mod) != .SUCCESS {
         log.error("Failed to create shader module.")
     }
     return mod
@@ -3128,8 +3130,9 @@ create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelin
     spec_constant_offset := 0
     for info, i in infos {
         // Shader state
-        log.debugf("Create shader modules for %v", info.name)
+        log.debugf("Create vertex shader module for %v", info.name)
         shader_modules[2 * i]     = create_shader_module(gd, info.vertex_shader_bytecode)
+        log.debugf("Create fragment shader module for %v", info.name)
         shader_modules[2 * i + 1] = create_shader_module(gd, info.fragment_shader_bytecode)
 
         vertex_spec_ptr : ^vk.SpecializationInfo = nil
