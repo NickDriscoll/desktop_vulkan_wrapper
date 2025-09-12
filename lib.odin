@@ -412,6 +412,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                     // Check for raytracing features
                     has_right_features : b32 = true
                     if .Raytracing in params.features {
+                        gd.support_flags += {.Raytracing}
                         has_right_features = accel_features.accelerationStructure &&
                                              accel_features.descriptorBindingAccelerationStructureUpdateAfterBind &&
                                              rt_pipeline_features.rayTracingPipeline &&
@@ -1253,7 +1254,7 @@ window_create_swapchain :: proc(gd: ^Graphics_Device, info: SwapchainInfo) -> bo
     return true
 }
 
-init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
+init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window, mode: vk.PresentModeKHR) -> bool {
     sdl2.Vulkan_CreateSurface(window, gd.instance, &gd.surface) or_return
 
     width, height : i32 = 0, 0
@@ -1261,7 +1262,7 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window) -> bool {
 
     info := SwapchainInfo {
         dimensions = {uint(width), uint(height)},
-        present_mode = .FIFO
+        present_mode = mode
     }
     window_create_swapchain(gd, info) or_return
 
