@@ -1870,7 +1870,10 @@ sync_create_image_with_data :: proc(
     bytes_per_pixel := u32(vk_format_pixel_size(create_info.format))
 
     bytes_size := len(bytes)
-    assert(bytes_size < STAGING_BUFFER_SIZE, "Image too big for staging buffer. Nick, stop being lazy.")
+    if bytes_size > STAGING_BUFFER_SIZE {
+        log.errorf("Width: %v\nHeight: %v\nDepth: %v", create_info.extent.width, create_info.extent.height, create_info.extent.depth)
+        assert(false, "Image too big for staging buffer. Nick, stop being lazy.")
+    }
     amount_transferred := 0
 
     // Upload the image data in STAGING_BUFFER_SIZE-sized chunks
