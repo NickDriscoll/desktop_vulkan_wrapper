@@ -194,7 +194,7 @@ Graphics_Device :: struct {
 
     // Acceleration structure state
     AS_buffer: Buffer_Handle,                                               // Stores built acceleration structures
-    AS_head: vk.DeviceSize,                                                 // Points to first free byte in AS_buffer
+    BLAS_head: vk.DeviceSize,                                                 // Points to location of next BLAS in AS_buffer
     AS_scratch_buffer: Buffer_Handle,                                       // Scratch buffer for AS builds
     AS_scratch_size: vk.DeviceSize,                                         // Current size of AS_scratch_buffer
     BLAS_queued_build_infos: queue.Queue(AccelerationStructureBuildInfo),     // Queue of bottom-level acceleration structures to build this frame
@@ -583,7 +583,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
     }
 
-    //Load proc addrs that come from the device driver
+    // Load proc addrs that come from the device driver
     vk.load_proc_addresses_device(gd.device)
 
     // Initialize the Vulkan Memory Allocator
@@ -2206,7 +2206,7 @@ begin_gfx_command_buffer :: proc(
         log.error("Unable to begin gfx command buffer.")
     }
 
-    // Do per-frame that has to happen for any gfx command buffer
+    // Do per-frame work that has to happen for any gfx command buffer
     {
         // Process buffer delete queue
         for queue.len(gd.buffer_deletes) > 0 && queue.front_ptr(&gd.buffer_deletes).death_frame == gd.frame_count {
@@ -3404,7 +3404,7 @@ AccelerationStructure :: struct {
 }
 AccelerationStructureCreateInfo :: struct {
     flags: vk.AccelerationStructureCreateFlagsKHR,
-    type: vk.AccelerationStructureTypeKHR,
+    type: vk.AccelerationStructureTypeKHR
 }
 
 ASTrianglesData :: struct {
@@ -3546,7 +3546,19 @@ create_acceleration_structure :: proc(
     } else {
         // AS does not exist yet
         
-        offset := gd.AS_head
+        offset := gd.BLAS_head
+        if (create_info.type == .TOP_LEVEL) {
+            // Will the TLAS fit into 1/nth of the remaining AS_buffer space?
+            available_bytes := (AS_BUFFER_SIZE - gd.BLAS_head) / vk.DeviceSize(gd.frames_in_flight)
+            if build_sizes.accelerationStructureSize > available_bytes {
+                log.error("Not enough space in AS_buffer for TLAS!")
+            }
+
+            tlas_idx := u32(gd.frame_count) % gd.frames_in_flight
+            offset += available_bytes * vk.DeviceSize(tlas_idx / gd.frames_in_flight)
+            log.debugf("tlas_idx: %v\noffset: %v\n\n", tlas_idx, offset)
+        }
+
         info := vk.AccelerationStructureCreateInfoKHR {
             sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
             pNext = nil,
@@ -3564,7 +3576,7 @@ create_acceleration_structure :: proc(
 
         if create_info.type == .BOTTOM_LEVEL {
             aligned_size := size_to_alignment(build_sizes.accelerationStructureSize, AS_BUFFER_ALIGNMENT)
-            gd.AS_head += aligned_size
+            gd.BLAS_head += aligned_size
         }
 
         ret_handle = Acceleration_Structure_Handle(hm.insert(&gd.acceleration_structures, AccelerationStructure {
@@ -3608,7 +3620,7 @@ delete_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration
     return true
 }
 
-build_queued_blases :: proc(gd: ^Graphics_Device) {
+cmd_build_queued_blases :: proc(gd: ^Graphics_Device) {
     if queue.len(gd.BLAS_queued_build_infos) > 0 {
         build_infos := make([dynamic]AccelerationStructureBuildInfo, 0, queue.len(gd.BLAS_queued_build_infos), context.temp_allocator)
         for queue.len(gd.BLAS_queued_build_infos) > 0 {
