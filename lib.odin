@@ -1151,8 +1151,22 @@ SwapchainInfo :: struct {
 }
 
 window_create_swapchain :: proc(gd: ^Graphics_Device, info: SwapchainInfo) -> bool {
-    // surface_caps := 
-    // vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gd.physical_device, gd.surface)
+    surface_caps: vk.SurfaceCapabilitiesKHR
+    vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gd.physical_device, gd.surface, &surface_caps)
+
+    dimensions := [2]u32{u32(info.dimensions.x), u32(info.dimensions.y)}
+    if dimensions.x < surface_caps.minImageExtent.width {
+        dimensions.x = surface_caps.minImageExtent.width
+    }
+    if dimensions.x > surface_caps.maxImageExtent.width {
+        dimensions.x = surface_caps.maxImageExtent.width
+    }
+    if dimensions.y < surface_caps.minImageExtent.height {
+        dimensions.y = surface_caps.minImageExtent.height
+    }
+    if dimensions.y > surface_caps.maxImageExtent.height {
+        dimensions.y = surface_caps.maxImageExtent.height
+    }
 
     image_format := vk.Format.B8G8R8A8_SRGB
     create_info := vk.SwapchainCreateInfoKHR {
@@ -1164,8 +1178,8 @@ window_create_swapchain :: proc(gd: ^Graphics_Device, info: SwapchainInfo) -> bo
         imageFormat = image_format,
         imageColorSpace = .SRGB_NONLINEAR,
         imageExtent = vk.Extent2D {
-            width = u32(info.dimensions.x),
-            height = u32(info.dimensions.y)
+            width = dimensions.x,
+            height = dimensions.y
         },
         imageArrayLayers = 1,
         imageUsage = {.COLOR_ATTACHMENT},
