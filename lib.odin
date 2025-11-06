@@ -808,7 +808,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             descriptorType = .ACCELERATION_STRUCTURE_KHR,
             descriptorCount = TOTAL_AS_DESCRIPTORS,
             stageFlags = {.FRAGMENT},
-            pImmutableSamplers = raw_data(samplers[:])
+            pImmutableSamplers = nil
         }
         bindings : []vk.DescriptorSetLayoutBinding = {image_binding, sampler_binding, AS_binding}
         bindings_count : u32 = 2
