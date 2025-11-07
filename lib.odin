@@ -773,8 +773,8 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 addressModeV = .CLAMP_TO_EDGE,
                 addressModeW = .CLAMP_TO_EDGE,
                 mipLodBias = 0.0,
-                anisotropyEnable = true,
-                maxAnisotropy = 16.0
+                anisotropyEnable = false,
+                maxAnisotropy = 1.0
             })
 
             debug_names : [Immutable_Sampler_Index]cstring = {
