@@ -3480,7 +3480,7 @@ make_geo_data_structs :: proc(gd: ^Graphics_Device, geometries: []AccelerationSt
                 }
             }
             case ASInstancesData: {
-                // Copy instance to GPU
+                // Copy instances to GPU
                 sync_write_buffer(gd, gd.TLAS_instance_buffer, d.data[:])
                 b, _ := get_buffer(gd, gd.TLAS_instance_buffer)
 
@@ -3544,9 +3544,6 @@ create_acceleration_structure :: proc(
     assert(.Raytracing in gd.support_flags)
     build_sizes := get_acceleration_structure_build_sizes(gd, build_info^)
 
-    // Record new required scratch buffer size
-    gd.AS_required_scratch_size += build_sizes.buildScratchSize
-
     as_buffer, _ := get_buffer(gd, gd.AS_buffer)
 
     src_AS, have_src := get_acceleration_structure(gd, build_info.src)
@@ -3554,11 +3551,17 @@ create_acceleration_structure :: proc(
     if have_src && src_AS.handle != 0 {
         // AS already exists and we're updating it
 
+        // Update required scratch buffer size
+        gd.AS_required_scratch_size += build_sizes.updateScratchSize
+
         build_info.mode = .UPDATE
         build_info.dst = src_AS.handle
         ret_handle = build_info.src
     } else {
         // AS does not exist yet
+
+        // Update required scratch buffer size
+        gd.AS_required_scratch_size += build_sizes.buildScratchSize
         
         offset := gd.BLAS_head
         if (create_info.type == .TOP_LEVEL) {
@@ -3569,7 +3572,8 @@ create_acceleration_structure :: proc(
             }
 
             tlas_idx := u32(gd.frame_count) % gd.frames_in_flight
-            offset += available_bytes * vk.DeviceSize(tlas_idx / gd.frames_in_flight)
+            offset += available_bytes * vk.DeviceSize(tlas_idx)
+            offset = size_to_alignment(offset, AS_BUFFER_ALIGNMENT)
             log.debugf("tlas_idx: %v\noffset: %v\n\n", tlas_idx, offset)
         }
 
@@ -3642,7 +3646,6 @@ cmd_build_queued_blases :: proc(gd: ^Graphics_Device) {
             append(&build_infos, as_build_info)
         }
         cmd_build_acceleration_structures(gd, build_infos[:])
-        gd.AS_required_scratch_size = 0
     }
 }
 
@@ -3753,5 +3756,7 @@ cmd_build_acceleration_structures :: proc(
             size = vk.DeviceSize(vk.WHOLE_SIZE),
         }
     }, {})
+    
+    gd.AS_required_scratch_size = 0
 }
 
