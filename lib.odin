@@ -22,7 +22,7 @@ MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
 PUSH_CONSTANTS_SIZE :: 128
 STAGING_BUFFER_SIZE :: 16 * 1024 * 1024
 AS_BUFFER_SIZE :: 16 * 1024 * 1024
-TLAS_INSTANCE_BUFFER_SIZE :: 16 * 1024
+MAX_TLAS_INSTANCES :: 16 * 1024
 
 PIPELINE_CACHE_FILENAME :: ".shadercache"
 
@@ -952,7 +952,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
         gd.AS_buffer = create_buffer(&gd, &info)
 
-        info.size = TLAS_INSTANCE_BUFFER_SIZE
+        info.size = MAX_TLAS_INSTANCES * size_of(vk.AccelerationStructureInstanceKHR) * vk.DeviceSize(gd.frames_in_flight)
         info.usage = {.ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,.TRANSFER_DST}
         info.required_flags += {.HOST_COHERENT,.HOST_VISIBLE}
         info.alloc_flags = {.Mapped}
@@ -3481,7 +3481,9 @@ make_geo_data_structs :: proc(gd: ^Graphics_Device, geometries: []AccelerationSt
             }
             case ASInstancesData: {
                 // Copy instances to GPU
-                sync_write_buffer(gd, gd.TLAS_instance_buffer, d.data[:])
+                in_flight_frame := u32(gd.frame_count) % gd.frames_in_flight
+                offset := in_flight_frame * MAX_TLAS_INSTANCES / 2
+                sync_write_buffer(gd, gd.TLAS_instance_buffer, d.data[:], offset)
                 b, _ := get_buffer(gd, gd.TLAS_instance_buffer)
 
                 geo_data.instances = vk.AccelerationStructureGeometryInstancesDataKHR {
@@ -3489,7 +3491,7 @@ make_geo_data_structs :: proc(gd: ^Graphics_Device, geometries: []AccelerationSt
                     pNext = nil,
                     arrayOfPointers = b32(d.array_of_pointers),
                     data = {
-                        deviceAddress = b.address
+                        deviceAddress = b.address + vk.DeviceAddress(offset) * size_of(vk.AccelerationStructureInstanceKHR)
                     }
                 }
             }
