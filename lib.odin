@@ -1133,6 +1133,37 @@ device_wait_idle :: proc(gd: ^GraphicsDevice) -> vk.Result {
     return vk.DeviceWaitIdle(gd.device)
 }
 
+wait_timeline_semaphore :: proc(gd: ^GraphicsDevice, semaphore: Semaphore_Handle, value: u64) {
+    // CPU-sync to prevent CPU from getting further ahead than
+    // the number of frames in flight
+    sem, ok := get_semaphore(gd, semaphore)
+    if !ok {
+        log.error("Couldn't find semaphore for CPU-sync")
+    }
+
+    v := value
+    info := vk.SemaphoreWaitInfo {
+        sType = .SEMAPHORE_WAIT_INFO,
+        pNext = nil,
+        flags = nil,
+        semaphoreCount = 1,
+        pSemaphores = sem,
+        pValues = &v
+    }
+    res := vk.WaitSemaphores(gd.device, &info, max(u64))
+    if res != .SUCCESS {
+        log.errorf("CPU failed to wait for timeline semaphore: %v", res)
+    }
+}
+
+wait_frames_in_flight :: proc(gd: ^GraphicsDevice, semaphore: Semaphore_Handle) {
+    if gd.frame_count >= u64(gd.frames_in_flight) {
+        //scoped_event(&profiler, "GFX timeline semaphore wait")
+        wait_value := gd.frame_count - u64(gd.frames_in_flight) + 1
+        wait_timeline_semaphore(gd, semaphore, wait_value)
+    }
+}
+
 assign_debug_name :: proc(device: vk.Device, object_type: vk.ObjectType, object_handle: u64, name: cstring) {
     name_info := vk.DebugUtilsObjectNameInfoEXT {
         sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
