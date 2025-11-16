@@ -59,7 +59,7 @@ Bindless_Descriptor_Bindings :: enum u32 {
     Samplers = 1,
     AccelerationStructures = 2,
 }
-TOTAL_AS_DESCRIPTORS :: 4
+TOTAL_TLAS_DESCRIPTORS :: 4
 
 Immutable_Sampler_Index :: enum u32 {
     Aniso16 = 0,
@@ -96,13 +96,13 @@ sync_init :: proc(s: ^SyncInfo) {
     s.signal_ops = make([dynamic]Semaphore_Op)
 }
 
-add_wait_op :: proc(gd: ^Graphics_Device, i: ^SyncInfo, handle: Semaphore_Handle, value : u64 = 0) {
+add_wait_op :: proc(gd: ^GraphicsDevice, i: ^SyncInfo, handle: Semaphore_Handle, value : u64 = 0) {
     append(&i.wait_ops, Semaphore_Op {
         semaphore = handle,
         value = value
     })
 }
-add_signal_op :: proc(gd: ^Graphics_Device, i: ^SyncInfo, handle: Semaphore_Handle, value : u64 = 0) {
+add_signal_op :: proc(gd: ^GraphicsDevice, i: ^SyncInfo, handle: Semaphore_Handle, value : u64 = 0) {
     append(&i.signal_ops, Semaphore_Op {
         semaphore = handle,
         value = value
@@ -131,7 +131,7 @@ Acceleration_Structure_Handle :: distinct hm.Handle
 Semaphore_Handle :: distinct hm.Handle
 
 // Megastruct holding basically all Vulkan-specific state
-Graphics_Device :: struct {
+GraphicsDevice :: struct {
     // Basic Vulkan state that every app definitely needs
     instance: vk.Instance,
     physical_device: vk.PhysicalDevice,
@@ -238,7 +238,7 @@ string_from_bytes :: proc(bytes: []u8) -> string {
     return strings.string_from_null_terminated_ptr(&bytes[0], len(bytes))
 }
 
-Init_Parameters :: struct {
+InitParameters :: struct {
     // Vulkan instance creation parameters
     app_name: cstring,
     app_version: u32,
@@ -250,27 +250,27 @@ Init_Parameters :: struct {
 
     frames_in_flight: u32,      // Maximum number of command buffers active at once
 
-    features: SupportFlags
+    desired_features: SupportFlags
 }
 
-init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
+init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
     assert(params.frames_in_flight > 0)
 
     comp_bytes_to_string :: proc(bytes: []byte, s: string) -> bool {
         return string(bytes[0:len(s)]) == s
     }
 
-    string_contained :: proc(list: []vk.ExtensionProperties, cand: string) -> bool {
+    string_contained :: proc(list: []vk.ExtensionProperties, candidate: string) -> bool {
         for ext in list {
             name := ext.extensionName
-            if comp_bytes_to_string(name[:], cand) {
+            if comp_bytes_to_string(name[:], candidate) {
                 return true
             }
         }
         return false
     }
 
-    gd: Graphics_Device
+    gd: GraphicsDevice
     gd.frames_in_flight = params.frames_in_flight
     gd.alloc_callbacks = params.allocation_callbacks
 
@@ -289,13 +289,13 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         // the extensions they want to enable, I want to provide high-level
         // idioms that cover many extensions in the same logical category
 
-        ext_count: u32 
+        ext_count: u32
         vk.EnumerateInstanceExtensionProperties(nil, &ext_count, nil)
         supported_extensions := make([dynamic]vk.ExtensionProperties, ext_count, context.temp_allocator)
         vk.EnumerateInstanceExtensionProperties(nil, &ext_count, raw_data(supported_extensions))
 
         final_extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
-        if .Window in params.features {
+        if .Window in params.desired_features {
             exts: []string
             when ODIN_OS == .Windows {
                 exts = {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_WIN32_SURFACE_EXTENSION_NAME}
@@ -313,15 +313,19 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             }
         }
 
-        append(&final_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
-        debug_info := vk.DebugUtilsMessengerCreateInfoEXT {
-            sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-            pNext = nil,
-            flags = nil,
-            messageSeverity = {.ERROR,.WARNING},
-            messageType = {.GENERAL,.VALIDATION},
-            pfnUserCallback = debug_utils_callback,
-            pUserData = nil
+        instance_create_pnext : rawptr = nil
+        when ODIN_DEBUG {
+            append(&final_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+            debug_info := vk.DebugUtilsMessengerCreateInfoEXT {
+                sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                pNext = nil,
+                flags = nil,
+                messageSeverity = {.ERROR,.WARNING},
+                messageType = {.GENERAL,.VALIDATION},
+                pfnUserCallback = debug_utils_callback,
+                pUserData = nil
+            }
+            instance_create_pnext = &debug_info
         }
 
         app_info := vk.ApplicationInfo {
@@ -335,7 +339,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         }
         create_info := vk.InstanceCreateInfo {
             sType = .INSTANCE_CREATE_INFO,
-            pNext = &debug_info,
+            pNext = instance_create_pnext,
             flags = nil,
             pApplicationInfo = &app_info,
             enabledLayerCount = 0,
@@ -411,7 +415,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
     
                     // Check for raytracing features
                     has_right_features : b32 = true
-                    if .Raytracing in params.features {
+                    if .Raytracing in params.desired_features {
                         gd.support_flags += {.Raytracing}
                         has_right_features = accel_features.accelerationStructure &&
                                              accel_features.descriptorBindingAccelerationStructureUpdateAfterBind &&
@@ -425,7 +429,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                     } else {
                         vulkan_11_features.pNext = nil
                     }
-    
+
                     has_right_features =
                         vulkan_11_features.variablePointers &&
                         vulkan_12_features.descriptorIndexing &&
@@ -443,7 +447,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
                 }
             }
         }
-        assert(gd.physical_device != nil, "Didn't find VkPhysicalDevice")
+        assert(gd.physical_device != nil, "Didn't find suitable VkPhysicalDevice")
 
         // Query the physical device's queue family properties
         queue_family_count : u32 = 0
@@ -531,7 +535,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             }
             append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
         }
-        if .Window in params.features {
+        if .Window in params.desired_features {
             gd.support_flags += {.Window}
             if string_contained(supported_extensions[:], vk.KHR_SWAPCHAIN_EXTENSION_NAME) {
                 append(&final_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
@@ -806,7 +810,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
         AS_binding := vk.DescriptorSetLayoutBinding {
             binding = u32(Bindless_Descriptor_Bindings.AccelerationStructures),
             descriptorType = .ACCELERATION_STRUCTURE_KHR,
-            descriptorCount = TOTAL_AS_DESCRIPTORS,
+            descriptorCount = TOTAL_TLAS_DESCRIPTORS,
             stageFlags = {.FRAGMENT},
             pImmutableSamplers = nil
         }
@@ -846,7 +850,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
             },
             vk.DescriptorPoolSize {
                 type = .ACCELERATION_STRUCTURE_KHR,
-                descriptorCount = TOTAL_AS_DESCRIPTORS
+                descriptorCount = TOTAL_TLAS_DESCRIPTORS
             }
         }
 
@@ -1046,7 +1050,7 @@ init_vulkan :: proc(params: Init_Parameters) -> (Graphics_Device, vk.Result) {
     return gd, .SUCCESS
 }
 
-quit_vulkan :: proc(gd: ^Graphics_Device) {
+quit_vulkan :: proc(gd: ^GraphicsDevice) {
     // Save the pipeline cache to a file
     {
         res: vk.Result
@@ -1125,7 +1129,7 @@ quit_vulkan :: proc(gd: ^Graphics_Device) {
     vk.DestroyInstance(gd.instance, gd.alloc_callbacks)
 }
 
-device_wait_idle :: proc(gd: ^Graphics_Device) -> vk.Result {
+device_wait_idle :: proc(gd: ^GraphicsDevice) -> vk.Result {
     return vk.DeviceWaitIdle(gd.device)
 }
 
@@ -1150,7 +1154,7 @@ SwapchainInfo :: struct {
     present_mode: vk.PresentModeKHR
 }
 
-window_create_swapchain :: proc(gd: ^Graphics_Device, info: SwapchainInfo) -> bool {
+window_create_swapchain :: proc(gd: ^GraphicsDevice, info: SwapchainInfo) -> bool {
     surface_caps: vk.SurfaceCapabilitiesKHR
     vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gd.physical_device, gd.surface, &surface_caps)
 
@@ -1268,7 +1272,7 @@ window_create_swapchain :: proc(gd: ^Graphics_Device, info: SwapchainInfo) -> bo
     return true
 }
 
-init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window, mode: vk.PresentModeKHR) -> bool {
+init_sdl2_window :: proc(gd: ^GraphicsDevice, window: ^sdl2.Window, mode: vk.PresentModeKHR) -> bool {
     sdl2.Vulkan_CreateSurface(window, gd.instance, &gd.surface) or_return
 
     width, height : i32 = 0, 0
@@ -1283,7 +1287,7 @@ init_sdl2_window :: proc(gd: ^Graphics_Device, window: ^sdl2.Window, mode: vk.Pr
     return true
 }
 
-resize_window :: proc(gd: ^Graphics_Device, info: SwapchainInfo) -> bool {
+resize_window :: proc(gd: ^GraphicsDevice, info: SwapchainInfo) -> bool {
     // The graphics device's swapchain should exist
     assert(gd.swapchain != 0)
 
@@ -1302,7 +1306,7 @@ resize_window :: proc(gd: ^Graphics_Device, info: SwapchainInfo) -> bool {
     return true
 }
 
-in_flight_idx :: proc(gd: ^Graphics_Device) -> u64 {
+in_flight_idx :: proc(gd: ^GraphicsDevice) -> u64 {
     return gd.frame_count % u64(gd.frames_in_flight)
 }
 
@@ -1328,7 +1332,7 @@ Buffer_Delete :: struct {
     allocation: vma.Allocation,
 }
 
-create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Handle {
+create_buffer :: proc(gd: ^GraphicsDevice, buf_info: ^Buffer_Info) -> Buffer_Handle {
     qfis : []u32 = {gd.gfx_queue_family,gd.compute_queue_family,gd.transfer_queue_family}
 
     info := vk.BufferCreateInfo {
@@ -1370,7 +1374,7 @@ create_buffer :: proc(gd: ^Graphics_Device, buf_info: ^Buffer_Info) -> Buffer_Ha
     return Buffer_Handle(hm.insert(&gd.buffers, b))
 }
 
-get_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> (^Buffer, bool) {
+get_buffer :: proc(gd: ^GraphicsDevice, handle: Buffer_Handle) -> (^Buffer, bool) {
     return hm.get(&gd.buffers, hm.Handle(handle))
 }
 
@@ -1378,7 +1382,7 @@ get_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> (^Buffer, boo
 // Use when the data is small or if you don't care about stalling
 // @TODO: Maybe add sync_write_buffers()?
 sync_write_buffer :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     out_buffer: Buffer_Handle,
     in_slice: []$Element_Type,
     base_offset : u32 = 0,
@@ -1502,7 +1506,7 @@ sync_write_buffer :: proc(
     return true
 }
 
-delete_buffer :: proc(gd: ^Graphics_Device, handle: Buffer_Handle) -> bool {
+delete_buffer :: proc(gd: ^GraphicsDevice, handle: Buffer_Handle) -> bool {
     buffer := get_buffer(gd, handle) or_return
 
     buffer_delete := Buffer_Delete {
@@ -1565,6 +1569,14 @@ vk_format_pixel_size :: proc(format: vk.Format) -> int {
     return 0
 }
 
+image_format_to_aspect :: proc(format: vk.Format) -> vk.ImageAspectFlags {
+    if format == .D32_SFLOAT ||
+        format == .D16_UNORM {
+        return {.DEPTH}
+    }
+    return {.COLOR}
+}
+
 vk_format_block_size :: proc(format: vk.Format) -> int {
     #partial switch format {
         case .BC7_SRGB_BLOCK: return 16
@@ -1579,7 +1591,7 @@ vk_format_block_size :: proc(format: vk.Format) -> int {
     return 0
 }
 
-create_image :: proc(gd: ^Graphics_Device, image_info: ^Image_Create) -> Texture_Handle {
+create_image :: proc(gd: ^GraphicsDevice, image_info: ^Image_Create) -> Texture_Handle {
     // TRANSFER_DST is required for layout transitions period.
     // SAMPLED is required because all images in the system are
     // available in the bindless images array
@@ -1659,10 +1671,7 @@ create_image :: proc(gd: ^Graphics_Device, image_info: ^Image_Create) -> Texture
             }
         }
 
-        aspect_mask : vk.ImageAspectFlags = {.COLOR}
-        if image_info.format == .D32_SFLOAT {
-            aspect_mask = {.DEPTH}
-        }
+        aspect_mask := image_format_to_aspect(image_info.format)
 
         subresource_range := vk.ImageSubresourceRange {
             aspectMask = aspect_mask,
@@ -1705,17 +1714,14 @@ create_image :: proc(gd: ^Graphics_Device, image_info: ^Image_Create) -> Texture
     return Texture_Handle(hm.insert(&gd.images, image))
 }
 
-new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk.ImageLayout) -> Texture_Handle {
+new_bindless_image :: proc(gd: ^GraphicsDevice, info: ^Image_Create, layout: vk.ImageLayout) -> Texture_Handle {
     handle := create_image(gd, info)
     image, ok := hm.get(&gd.images, hm.Handle(handle))
     if !ok {
         log.error("Error in new_bindless_image()")
     }
 
-    aspect_mask : vk.ImageAspectFlags = {.COLOR}
-    if info.format == .D32_SFLOAT {
-        aspect_mask = {.DEPTH}
-    }
+    aspect_mask := image_format_to_aspect(info.format)
 
     // Calculate mipmap count
     mip_count : u32 = 1
@@ -1842,11 +1848,11 @@ new_bindless_image :: proc(gd: ^Graphics_Device, info: ^Image_Create, layout: vk
     return handle
 }
 
-get_image :: proc(gd: ^Graphics_Device, handle: Texture_Handle) -> (^Image, bool) {
+get_image :: proc(gd: ^GraphicsDevice, handle: Texture_Handle) -> (^Image, bool) {
     return hm.get(&gd.images, hm.Handle(handle))
 }
 
-get_image_vkhandle :: proc(gd: ^Graphics_Device, handle: Texture_Handle) -> (h: vk.Image, ok: bool) {
+get_image_vkhandle :: proc(gd: ^GraphicsDevice, handle: Texture_Handle) -> (h: vk.Image, ok: bool) {
     im := hm.get(&gd.images, hm.Handle(handle)) or_return
     return im.image, true
 }
@@ -1854,7 +1860,7 @@ get_image_vkhandle :: proc(gd: ^Graphics_Device, handle: Texture_Handle) -> (h: 
 // Blocking function for creating a new GPU image with initial data
 // Use when the data is small or if you don't care about stalling
 sync_create_image_with_data :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     create_info: ^Image_Create,
     bytes: []byte
 ) -> (out_handle: Texture_Handle, ok: bool) {
@@ -1875,11 +1881,8 @@ sync_create_image_with_data :: proc(
     if !create_info.has_mipmaps {
         create_info.mip_count = 1
     }
-    
-    aspect_mask : vk.ImageAspectFlags = {.COLOR} 
-    if create_info.format == .D32_SFLOAT {
-        aspect_mask = {.DEPTH}
-    }
+
+    aspect_mask := image_format_to_aspect(create_info.format)
 
     bytes_per_pixel := u32(vk_format_pixel_size(create_info.format))
 
@@ -2064,7 +2067,7 @@ sync_create_image_with_data :: proc(
     return
 }
 
-delete_image :: proc(gd: ^Graphics_Device, handle: Texture_Handle) -> bool {
+delete_image :: proc(gd: ^GraphicsDevice, handle: Texture_Handle) -> bool {
     image := hm.get(&gd.images, hm.Handle(handle)) or_return
 
     image_delete := Image_Delete {
@@ -2080,7 +2083,7 @@ delete_image :: proc(gd: ^Graphics_Device, handle: Texture_Handle) -> bool {
 }
 
 acquire_swapchain_image :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     sync: ^SyncInfo,
 ) -> (image_idx: u32, res: vk.Result) {
@@ -2131,7 +2134,7 @@ acquire_swapchain_image :: proc(
     return
 }
 
-present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> vk.Result {
+present_swapchain_image :: proc(gd: ^GraphicsDevice, image_idx: ^u32) -> vk.Result {
     sem, sem_ok := get_semaphore(gd, gd.present_semaphores[image_idx^])
     if !sem_ok {
         log.error("Couldn't get present semaphore.")
@@ -2157,7 +2160,7 @@ present_swapchain_image :: proc(gd: ^Graphics_Device, image_idx: ^u32) -> vk.Res
 CommandBuffer_Index :: distinct u32
 
 begin_compute_command_buffer :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     timeline_semaphore: Semaphore_Handle
 ) -> CommandBuffer_Index {
     // Sync point where we wait if there are already N frames in the gfx queue
@@ -2203,7 +2206,7 @@ begin_compute_command_buffer :: proc(
 }
 
 begin_gfx_command_buffer :: proc(
-    gd: ^Graphics_Device
+    gd: ^GraphicsDevice
 ) -> CommandBuffer_Index {
 
     cb_idx := CommandBuffer_Index(gd.next_gfx_command_buffer)
@@ -2310,7 +2313,7 @@ begin_gfx_command_buffer :: proc(
 }
 
 build_submit_infos :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     submit_infos: ^[dynamic]vk.SemaphoreSubmitInfoKHR,
     semaphore_ops: [dynamic]Semaphore_Op
 ) -> bool {
@@ -2330,7 +2333,7 @@ build_submit_infos :: proc(
 }
 
 submit_compute_command_buffer :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     sync: ^SyncInfo
 ) {
@@ -2369,7 +2372,7 @@ submit_compute_command_buffer :: proc(
 }
 
 submit_gfx_command_buffer :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     sync: ^SyncInfo
 ) {
@@ -2408,7 +2411,7 @@ submit_gfx_command_buffer :: proc(
 }
 
 submit_gfx_and_present :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     sync: ^SyncInfo,
     swapchain_idx: ^u32
@@ -2453,9 +2456,9 @@ submit_gfx_and_present :: proc(
 
 
 
-
+MAX_FRAMEBUFFER_COLOR_IMAGES :: 8
 Framebuffer :: struct {
-    color_images: [8]Texture_Handle,
+    color_images: [MAX_FRAMEBUFFER_COLOR_IMAGES]Texture_Handle,
     depth_image: Texture_Handle,
     resolution: hlsl.uint2,
     clear_color: hlsl.float4,
@@ -2463,7 +2466,7 @@ Framebuffer :: struct {
     depth_load_op: vk.AttachmentLoadOp
 }
 
-cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
+cmd_begin_render_pass :: proc(gd: ^GraphicsDevice, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
     cb := gd.gfx_command_buffers[cb_idx]
 
     iv, ok := hm.get(&gd.images, hm.Handle(framebuffer.color_images[0]))
@@ -2522,13 +2525,13 @@ cmd_begin_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
     vk.CmdBeginRendering(cb, &info)
 }
 
-cmd_bind_gfx_descriptor_set :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+cmd_bind_gfx_descriptor_set :: proc(gd: ^GraphicsDevice, cb_idx: CommandBuffer_Index) {
     cb := gd.gfx_command_buffers[cb_idx]
     vk.CmdBindDescriptorSets(cb, .GRAPHICS, gd.gfx_pipeline_layout, 0, 1, &gd.descriptor_set, 0, nil)
 }
 
 cmd_bind_gfx_pipeline :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     handle: Pipeline_Handle
 ) -> bool {
@@ -2539,7 +2542,7 @@ cmd_bind_gfx_pipeline :: proc(
 }
 
 cmd_bind_compute_pipeline :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     handle: Pipeline_Handle
 ) -> bool {
@@ -2550,7 +2553,7 @@ cmd_bind_compute_pipeline :: proc(
 }
 
 cmd_draw :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     vtx_count: u32,
     instance_count: u32,
@@ -2562,7 +2565,7 @@ cmd_draw :: proc(
 }
 
 cmd_draw_indexed :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     index_count: u32,
     instance_count: u32,
@@ -2575,7 +2578,7 @@ cmd_draw_indexed :: proc(
 }
 
 cmd_dispatch :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     group_countx: u32,
     group_county: u32,
@@ -2587,7 +2590,7 @@ cmd_dispatch :: proc(
 
 Viewport :: vk.Viewport
 cmd_set_viewport :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     first_viewport: u32,
     viewports: []Viewport
@@ -2598,7 +2601,7 @@ cmd_set_viewport :: proc(
 
 Scissor :: vk.Rect2D
 cmd_set_scissor :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     first_scissor: u32,
     scissors: []Scissor
@@ -2607,19 +2610,19 @@ cmd_set_scissor :: proc(
     vk.CmdSetScissor(cb, first_scissor, u32(len(scissors)), raw_data(scissors))
 }
 
-cmd_push_constants_gfx :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, in_struct: ^$Struct_Type) {
+cmd_push_constants_gfx :: proc(gd: ^GraphicsDevice, cb_idx: CommandBuffer_Index, in_struct: ^$Struct_Type) {
     cb := gd.gfx_command_buffers[cb_idx]
     byte_count : u32 = u32(size_of(Struct_Type))
     vk.CmdPushConstants(cb, gd.gfx_pipeline_layout, {.VERTEX,.FRAGMENT}, 0, byte_count, in_struct)
 }
 
-cmd_push_constants_compute :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, in_struct: ^$Struct_Type) {
+cmd_push_constants_compute :: proc(gd: ^GraphicsDevice, cb_idx: CommandBuffer_Index, in_struct: ^$Struct_Type) {
     cb := gd.compute_command_buffers[cb_idx]
     byte_count : u32 = u32(size_of(Struct_Type))
     vk.CmdPushConstants(cb, gd.compute_pipeline_layout, {.COMPUTE}, 0, byte_count, in_struct)
 }
 
-cmd_bind_index_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index, buffer: Buffer_Handle) -> bool {
+cmd_bind_index_buffer :: proc(gd: ^GraphicsDevice, cb_idx: CommandBuffer_Index, buffer: Buffer_Handle) -> bool {
     cb := gd.gfx_command_buffers[cb_idx]
     b := get_buffer(gd, buffer) or_return
     vk.CmdBindIndexBuffer(cb, b.buffer, 0, .UINT16)
@@ -2628,7 +2631,7 @@ cmd_bind_index_buffer :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index,
 }
 
 cmd_draw_indexed_indirect :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     draw_buffer_handle: Buffer_Handle,
     offset: u64,
@@ -2647,7 +2650,7 @@ cmd_draw_indexed_indirect :: proc(
     return true
 }
 
-cmd_end_render_pass :: proc(gd: ^Graphics_Device, cb_idx: CommandBuffer_Index) {
+cmd_end_render_pass :: proc(gd: ^GraphicsDevice, cb_idx: CommandBuffer_Index) {
     cb := gd.gfx_command_buffers[cb_idx]
     vk.CmdEndRendering(cb)
 }
@@ -2658,7 +2661,7 @@ Semaphore_Info :: struct {
     name: cstring
 }
 
-create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> Semaphore_Handle {
+create_semaphore :: proc(gd: ^GraphicsDevice, info: ^Semaphore_Info) -> Semaphore_Handle {
     t_info := vk.SemaphoreTypeCreateInfo {
         sType = .SEMAPHORE_TYPE_CREATE_INFO,
         pNext = nil,
@@ -2685,7 +2688,7 @@ create_semaphore :: proc(gd: ^Graphics_Device, info: ^Semaphore_Info) -> Semapho
     return Semaphore_Handle(hm.insert(&gd.semaphores, s))
 }
 
-check_timeline_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> (val: u64, ok: bool) {
+check_timeline_semaphore :: proc(gd: ^GraphicsDevice, handle: Semaphore_Handle) -> (val: u64, ok: bool) {
     sem := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
     v: u64
     if vk.GetSemaphoreCounterValue(gd.device, sem^, &v) != .SUCCESS {
@@ -2695,11 +2698,11 @@ check_timeline_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle)
     return v, true
 }
 
-get_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> (^vk.Semaphore, bool) {
+get_semaphore :: proc(gd: ^GraphicsDevice, handle: Semaphore_Handle) -> (^vk.Semaphore, bool) {
     return hm.get(&gd.semaphores, hm.Handle(handle))
 }
 
-destroy_semaphore :: proc(gd: ^Graphics_Device, handle: Semaphore_Handle) -> bool {
+destroy_semaphore :: proc(gd: ^GraphicsDevice, handle: Semaphore_Handle) -> bool {
     semaphore := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
     vk.DestroySemaphore(gd.device, semaphore^, gd.alloc_callbacks)
 
@@ -2738,7 +2741,7 @@ Image_Barrier :: struct {
 // Inserts an arbitrary number of memory barriers
 // into the gfx command buffer at this point
 cmd_gfx_pipeline_barriers :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     buffer_barriers: []Buffer_Barrier,
     image_barriers: []Image_Barrier
@@ -2802,7 +2805,7 @@ cmd_gfx_pipeline_barriers :: proc(
 // Inserts an arbitrary number of memory barriers
 // into the compute command buffer at this point
 cmd_compute_pipeline_barriers :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     buffer_barriers: []Buffer_Barrier,
     image_barriers: []Image_Barrier
@@ -2866,7 +2869,7 @@ cmd_compute_pipeline_barriers :: proc(
 // Inserts an arbitrary number of memory barriers
 // into the transfer command buffer at this point
 cmd_transfer_pipeline_barriers :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     cb_idx: CommandBuffer_Index,
     buffer_barriers: []Buffer_Barrier,
     image_barriers: []Image_Barrier
@@ -3052,7 +3055,7 @@ PipelineRenderpass_Info :: struct {
     depth_attachment_format: vk.Format
 }
 
-create_shader_module :: proc(gd: ^Graphics_Device, code: []u32) -> vk.ShaderModule {
+create_shader_module :: proc(gd: ^GraphicsDevice, code: []u32) -> vk.ShaderModule {
     info := vk.ShaderModuleCreateInfo {
         sType = .SHADER_MODULE_CREATE_INFO,
         pNext = nil,
@@ -3084,7 +3087,7 @@ GraphicsPipelineInfo :: struct {
     name: string,
 }
 
-create_graphics_pipelines :: proc(gd: ^Graphics_Device, infos: []GraphicsPipelineInfo) -> [dynamic]Pipeline_Handle {
+create_graphics_pipelines :: proc(gd: ^GraphicsDevice, infos: []GraphicsPipelineInfo) -> [dynamic]Pipeline_Handle {
     pipeline_count := len(infos)
 
     // Output dynamic array of pipeline handles
@@ -3358,7 +3361,7 @@ ComputePipelineInfo :: struct {
     name: string
 }
 
-create_compute_pipelines :: proc(gd: ^Graphics_Device, infos: []ComputePipelineInfo) -> [dynamic]Pipeline_Handle {
+create_compute_pipelines :: proc(gd: ^GraphicsDevice, infos: []ComputePipelineInfo) -> [dynamic]Pipeline_Handle {
     info_count := u32(len(infos))
     pipeline_create_infos := make([dynamic]vk.ComputePipelineCreateInfo, 0, info_count, allocator = context.temp_allocator)
     pipelines := make([dynamic]vk.Pipeline, 1, info_count, allocator = context.temp_allocator)
@@ -3461,7 +3464,7 @@ AS_Delete :: struct {
     handle: vk.AccelerationStructureKHR,
 }
 
-make_geo_data_structs :: proc(gd: ^Graphics_Device, geometries: []AccelerationStructureGeometry) -> [dynamic]vk.AccelerationStructureGeometryKHR {
+make_geo_data_structs :: proc(gd: ^GraphicsDevice, geometries: []AccelerationStructureGeometry) -> [dynamic]vk.AccelerationStructureGeometryKHR {
     geos := make([dynamic]vk.AccelerationStructureGeometryKHR, 0, len(geometries), context.temp_allocator)
     for geo in geometries {
         geo_data: vk.AccelerationStructureGeometryDataKHR
@@ -3511,7 +3514,7 @@ make_geo_data_structs :: proc(gd: ^Graphics_Device, geometries: []AccelerationSt
 }
 
 get_acceleration_structure_build_sizes :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     info: AccelerationStructureBuildInfo
 ) -> vk.AccelerationStructureBuildSizesInfoKHR {
     size_info: vk.AccelerationStructureBuildSizesInfoKHR
@@ -3539,7 +3542,7 @@ get_acceleration_structure_build_sizes :: proc(
 }
 
 create_acceleration_structure :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     create_info: AccelerationStructureCreateInfo,
     build_info: ^AccelerationStructureBuildInfo
 ) -> Acceleration_Structure_Handle {
@@ -3615,12 +3618,12 @@ create_acceleration_structure :: proc(
     return ret_handle
 }
 
-get_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> (^AccelerationStructure, bool) {
+get_acceleration_structure :: proc(gd: ^GraphicsDevice, handle: Acceleration_Structure_Handle) -> (^AccelerationStructure, bool) {
     as, b := hm.get(&gd.acceleration_structures, handle)
     return as, b
 }
 
-get_acceleration_structure_address :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> vk.DeviceAddress {
+get_acceleration_structure_address :: proc(gd: ^GraphicsDevice, handle: Acceleration_Structure_Handle) -> vk.DeviceAddress {
     blas, _ := hm.get(&gd.acceleration_structures, handle)
     addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
         sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
@@ -3630,7 +3633,7 @@ get_acceleration_structure_address :: proc(gd: ^Graphics_Device, handle: Acceler
     return vk.GetAccelerationStructureDeviceAddressKHR(gd.device, &addr_info)
 }
 
-delete_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration_Structure_Handle) -> bool {
+delete_acceleration_structure :: proc(gd: ^GraphicsDevice, handle: Acceleration_Structure_Handle) -> bool {
     as := hm.get(&gd.acceleration_structures, handle) or_return
     queue.append(&gd.AS_deletes, AS_Delete {
         death_frame = gd.frame_count + u64(gd.frames_in_flight),
@@ -3640,7 +3643,7 @@ delete_acceleration_structure :: proc(gd: ^Graphics_Device, handle: Acceleration
     return true
 }
 
-cmd_build_queued_blases :: proc(gd: ^Graphics_Device) {
+cmd_build_queued_blases :: proc(gd: ^GraphicsDevice) {
     if queue.len(gd.BLAS_queued_build_infos) > 0 {
         build_infos := make([dynamic]AccelerationStructureBuildInfo, 0, queue.len(gd.BLAS_queued_build_infos), context.temp_allocator)
         for queue.len(gd.BLAS_queued_build_infos) > 0 {
@@ -3652,7 +3655,7 @@ cmd_build_queued_blases :: proc(gd: ^Graphics_Device) {
 }
 
 cmd_build_acceleration_structures :: proc(
-    gd: ^Graphics_Device,
+    gd: ^GraphicsDevice,
     infos: []AccelerationStructureBuildInfo
 ) {
     cb_idx := CommandBuffer_Index(in_flight_idx(gd))
