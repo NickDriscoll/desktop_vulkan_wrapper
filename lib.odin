@@ -91,9 +91,9 @@ SyncInfo :: struct {
     signal_ops: [dynamic]Semaphore_Op,
 }
 
-sync_init :: proc(s: ^SyncInfo) {
-    s.wait_ops = make([dynamic]Semaphore_Op)
-    s.signal_ops = make([dynamic]Semaphore_Op)
+sync_init :: proc(s: ^SyncInfo, allocator := context.allocator) {
+    s.wait_ops = make([dynamic]Semaphore_Op, allocator)
+    s.signal_ops = make([dynamic]Semaphore_Op, allocator)
 }
 
 add_wait_op :: proc(gd: ^GraphicsDevice, i: ^SyncInfo, handle: Semaphore_Handle, value : u64 = 0) {
@@ -586,6 +586,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
             return gd, r
         }
     }
+    log.debug("After vkCreateDevice()")
 
     // Load proc addrs that come from the device driver
     vk.load_proc_addresses_device(gd.device)
@@ -618,6 +619,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
             log.error("Failed to initialize VMA.")
         }
     }
+    log.debug("After vma.create_allocator()")
 
     // Cache individual device queues
     // We only use one queue from each family
@@ -673,6 +675,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
         }
         assign_debug_name(gd.device, .COMMAND_POOL, u64(gd.transfer_command_pool), "Transfer Command Pool")
     }
+    log.debug("After create command pools")
 
     // Create command buffers
     gd.gfx_command_buffers = make([dynamic]vk.CommandBuffer, params.frames_in_flight, context.allocator)
@@ -732,6 +735,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
             strings.builder_reset(&sb)
         }
     }
+    log.debugf("After create command buffers")
 
     // Create bindless descriptor set
     samplers: [TOTAL_IMMUTABLE_SAMPLERS]vk.Sampler
@@ -932,6 +936,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
         queue.init(&gd.buffer_deletes)
         queue.init(&gd.image_deletes)
         queue.init(&gd.BLAS_queued_build_infos)
+        queue.init(&gd.AS_deletes)
     }
 
     // Create staging buffer
@@ -1047,6 +1052,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
         }
     }
 
+    log.debugf("At the end of init_vulkan()")
     return gd, .SUCCESS
 }
 
@@ -1165,16 +1171,18 @@ wait_frames_in_flight :: proc(gd: ^GraphicsDevice, semaphore: Semaphore_Handle) 
 }
 
 assign_debug_name :: proc(device: vk.Device, object_type: vk.ObjectType, object_handle: u64, name: cstring) {
-    name_info := vk.DebugUtilsObjectNameInfoEXT {
-        sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
-        pNext = nil,
-        objectType = object_type,
-        objectHandle = object_handle,
-        pObjectName = name
-    }
-    r := vk.SetDebugUtilsObjectNameEXT(device, &name_info)
-    if r != .SUCCESS {
-        log.errorf("Failed to set object's debug name: %v", r)
+    when ODIN_DEBUG {
+        name_info := vk.DebugUtilsObjectNameInfoEXT {
+            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+            pNext = nil,
+            objectType = object_type,
+            objectHandle = object_handle,
+            pObjectName = name
+        }
+        r := vk.SetDebugUtilsObjectNameEXT(device, &name_info)
+        if r != .SUCCESS {
+            log.errorf("Failed to set object's debug name: %v", r)
+        }
     }
 }
 
