@@ -464,6 +464,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
             flags := qfp.queueFamilyProperties.queueFlags
             if vk.QueueFlag.GRAPHICS in flags {
                 gd.gfx_queue_family = u32(i)
+                break
             }
         }
         gd.compute_queue_family = gd.gfx_queue_family
@@ -1211,13 +1212,15 @@ window_create_swapchain :: proc(gd: ^GraphicsDevice, info: SwapchainInfo) -> boo
         dimensions.y = surface_caps.maxImageExtent.height
     }
 
+    min_images := max(gd.frames_in_flight, surface_caps.minImageCount)
+
     image_format := vk.Format.B8G8R8A8_SRGB
     create_info := vk.SwapchainCreateInfoKHR {
         sType = .SWAPCHAIN_CREATE_INFO_KHR,
         pNext = nil,
         flags = nil,
         surface = gd.surface,
-        minImageCount = gd.frames_in_flight,
+        minImageCount = min_images,
         imageFormat = image_format,
         imageColorSpace = .SRGB_NONLINEAR,
         imageExtent = vk.Extent2D {
@@ -1372,7 +1375,24 @@ Buffer_Delete :: struct {
 }
 
 create_buffer :: proc(gd: ^GraphicsDevice, buf_info: ^Buffer_Info) -> Buffer_Handle {
-    qfis : []u32 = {gd.gfx_queue_family,gd.compute_queue_family,gd.transfer_queue_family}
+    qfis : []u32 = {gd.gfx_queue_family, 0, 0}
+    qfi_count := 1
+    if gd.gfx_queue_family != gd.compute_queue_family {
+        qfis[1] = gd.compute_queue_family
+        if gd.compute_queue_family != gd.transfer_queue_family {
+            qfis[2] = gd.transfer_queue_family
+            qfi_count += 1
+        }
+        qfi_count += 1
+    } else if gd.gfx_queue_family != gd.transfer_queue_family {
+        qfis[1] = gd.transfer_queue_family
+        qfi_count += 1
+    }
+
+    sharing_mode := vk.SharingMode.EXCLUSIVE
+    if qfi_count > 1 {
+        sharing_mode = .CONCURRENT
+    }
 
     info := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
@@ -1380,8 +1400,8 @@ create_buffer :: proc(gd: ^GraphicsDevice, buf_info: ^Buffer_Info) -> Buffer_Han
         flags = nil,
         size = buf_info.size,
         usage = buf_info.usage + {.SHADER_DEVICE_ADDRESS},
-        sharingMode = .CONCURRENT,
-        queueFamilyIndexCount = u32(len(qfis)),
+        sharingMode = sharing_mode,
+        queueFamilyIndexCount = u32(qfi_count),
         pQueueFamilyIndices = raw_data(qfis[:])
     }
     alloc_info := vma.Allocation_Create_Info {
@@ -3378,7 +3398,7 @@ create_graphics_pipelines :: proc(gd: ^GraphicsDevice, infos: []GraphicsPipeline
         &pipelines[0]
     )
     if res != .SUCCESS {
-        log.error("Failed to compile graphics pipelines")
+        log.errorf("Failed to compile graphics pipelines: %v", res)
     }
 
     // Put newly created pipelines in the Handle_Map
