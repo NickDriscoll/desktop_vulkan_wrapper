@@ -1628,7 +1628,7 @@ vk_format_pixel_size :: proc(format: vk.Format) -> int {
     return 0
 }
 
-image_format_to_aspect :: proc(format: vk.Format) -> vk.ImageAspectFlags {
+format_aspect_flags :: proc(format: vk.Format) -> vk.ImageAspectFlags {
     if format == .D32_SFLOAT ||
         format == .D16_UNORM {
         return {.DEPTH}
@@ -1730,7 +1730,7 @@ create_image :: proc(gd: ^GraphicsDevice, image_info: ^Image_Create) -> Texture_
             }
         }
 
-        aspect_mask := image_format_to_aspect(image_info.format)
+        aspect_mask := format_aspect_flags(image_info.format)
 
         subresource_range := vk.ImageSubresourceRange {
             aspectMask = aspect_mask,
@@ -1780,7 +1780,7 @@ new_bindless_image :: proc(gd: ^GraphicsDevice, info: ^Image_Create, layout: vk.
         log.error("Error in new_bindless_image()")
     }
 
-    aspect_mask := image_format_to_aspect(info.format)
+    aspect_mask := format_aspect_flags(info.format)
 
     // Calculate mipmap count
     mip_count : u32 = 1
@@ -1941,7 +1941,7 @@ sync_create_image_with_data :: proc(
         create_info.mip_count = 1
     }
 
-    aspect_mask := image_format_to_aspect(create_info.format)
+    aspect_mask := format_aspect_flags(create_info.format)
 
     bytes_per_pixel := u32(vk_format_pixel_size(create_info.format))
 
