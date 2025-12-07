@@ -296,12 +296,11 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
 
         final_extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
         if .Window in params.desired_features {
-            exts: []string
             when ODIN_OS == .Windows {
-                exts = {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_WIN32_SURFACE_EXTENSION_NAME}
+                exts : []string = {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_WIN32_SURFACE_EXTENSION_NAME}
             }
             when ODIN_OS == .Linux {
-                exts = {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_XLIB_SURFACE_EXTENSION_NAME}
+                exts := {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_XLIB_SURFACE_EXTENSION_NAME}
             }
 
             for ext in exts {
@@ -370,6 +369,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
         // Select the physical device to use
         // @NOTE: We only support using a single physical device at once
         features: vk.PhysicalDeviceFeatures2
+        final_extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
         outer: for device_type in preferred_device_types {
             for pd in phys_devices {
                 // Query this physical device's properties
@@ -412,25 +412,74 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
                     sync2_features.pNext = &dynamic_rendering_features
                     features.pNext = &sync2_features
                     vk.GetPhysicalDeviceFeatures2(pd, &features)
+
+                    
+
+                    // Device extensions
+
+                    //Load all supported device extensions for later querying
+                    extension_count : u32 = 0
+                    vk.EnumerateDeviceExtensionProperties(pd, nil, &extension_count, nil)
+                    supported_extensions := make([dynamic]vk.ExtensionProperties, extension_count, context.temp_allocator)
+                    vk.EnumerateDeviceExtensionProperties(pd, nil, &extension_count, raw_data(supported_extensions))
+
+                    required_extensions: []string = {
+                        vk.EXT_MEMORY_BUDGET_EXTENSION_NAME
+                    }
+
+                    for ext in required_extensions {
+                        if !string_contained(supported_extensions[:], ext) {
+                            log.errorf("Device doesn't have required extension: %v", ext)
+                            return gd, .ERROR_EXTENSION_NOT_PRESENT
+                        }
+                        append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
+                    }
+                    if .Window in params.desired_features {
+                        gd.support_flags += {.Window}
+                        if string_contained(supported_extensions[:], vk.KHR_SWAPCHAIN_EXTENSION_NAME) {
+                            append(&final_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+                        } else {
+                            log.errorf("Requested window support but %v was not found", vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+                            gd.support_flags -= {.Window}
+                        }
+                    }
     
                     // Check for raytracing features
-                    has_right_features : b32 = true
                     if .Raytracing in params.desired_features {
+                        has_right_features : b32 = true
                         gd.support_flags += {.Raytracing}
-                        has_right_features = accel_features.accelerationStructure &&
-                                             accel_features.descriptorBindingAccelerationStructureUpdateAfterBind &&
-                                             rt_pipeline_features.rayTracingPipeline &&
-                                             ray_query_features.rayQuery
+                        has_right_features &= accel_features.accelerationStructure &&
+                                              accel_features.descriptorBindingAccelerationStructureUpdateAfterBind &&
+                                              rt_pipeline_features.rayTracingPipeline &&
+                                              ray_query_features.rayQuery
+
+                        rt_exts : []string = {
+                            vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+                            vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+                            vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+                            vk.KHR_RAY_QUERY_EXTENSION_NAME,
+                        }
+                        for ext in rt_exts {
+                            if !string_contained(supported_extensions[:], ext) {
+                                log.errorf("Requested raytracing support but %v was not found", ext)
+                                has_right_features = false
+                                break
+                            }
+                        }
     
                         if !has_right_features {
                             gd.support_flags -= {.Raytracing}
                             vulkan_11_features.pNext = nil
+                        } else {
+                            for ext in rt_exts {
+                                append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
+                            }
                         }
                     } else {
                         vulkan_11_features.pNext = nil
                     }
 
-                    has_right_features =
+                    has_right_features :=
                         vulkan_11_features.variablePointers &&
                         vulkan_12_features.descriptorIndexing &&
                         vulkan_12_features.runtimeDescriptorArray &&
@@ -444,6 +493,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
                         log.infof("Chosen GPU: %s", string_from_bytes(props.properties.deviceName[:]))
                         break outer
                     }
+                    clear(&final_extensions)
                 }
             }
         }
@@ -516,58 +566,6 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
             }
         }
 
-        // Device extensions
-
-        //Load all supported device extensions for later querying
-        extension_count : u32 = 0
-        vk.EnumerateDeviceExtensionProperties(gd.physical_device, nil, &extension_count, nil)
-        supported_extensions := make([dynamic]vk.ExtensionProperties, extension_count, context.temp_allocator)
-        vk.EnumerateDeviceExtensionProperties(gd.physical_device, nil, &extension_count, raw_data(supported_extensions))
-
-        required_extensions: []string = {
-            vk.EXT_MEMORY_BUDGET_EXTENSION_NAME
-        }
-
-        final_extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
-        for ext in required_extensions {
-            if !string_contained(supported_extensions[:], ext) {
-                log.errorf("Device doesn't have required extension: %v", ext)
-                return gd, .ERROR_EXTENSION_NOT_PRESENT
-            }
-            append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
-        }
-        if .Window in params.desired_features {
-            gd.support_flags += {.Window}
-            if string_contained(supported_extensions[:], vk.KHR_SWAPCHAIN_EXTENSION_NAME) {
-                append(&final_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
-            } else {
-                log.errorf("Requested window support but %v was not found", vk.KHR_SWAPCHAIN_EXTENSION_NAME)
-                gd.support_flags -= {.Window}
-            }
-        }
-        if .Raytracing in gd.support_flags {
-            gd.support_flags += {.Raytracing}
-            rt_exts : []string = {
-                vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-                vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-                vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-                vk.KHR_RAY_QUERY_EXTENSION_NAME,
-            }
-            for ext in rt_exts {
-                if !string_contained(supported_extensions[:], ext) {
-                    log.errorf("Requested raytracing support but %v was not found", ext)
-                    gd.support_flags -= {.Raytracing}
-                    break
-                }
-            }
-
-            if .Raytracing in gd.support_flags {
-                for ext in rt_exts {
-                    append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
-                }
-            }
-        }
-
         // Create logical device
         create_info := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
@@ -583,7 +581,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
 
         r := vk.CreateDevice(gd.physical_device, &create_info, params.allocation_callbacks, &gd.device)
         if r != .SUCCESS {
-            log.error("Failed to create device.")
+            log.errorf("Failed to create device: %v", r)
             return gd, r
         }
     }
