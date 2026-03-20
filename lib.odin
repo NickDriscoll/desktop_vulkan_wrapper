@@ -3,7 +3,6 @@ package desktop_vulkan_wrapper
 import "core:container/queue"
 import "core:fmt"
 import "core:log"
-import "core:math"
 import "core:math/linalg/hlsl"
 import "core:mem"
 import "core:os"
@@ -200,7 +199,7 @@ GraphicsDevice :: struct {
     BLAS_queued_build_infos: queue.Queue(AccelerationStructureBuildInfo),     // Queue of bottom-level acceleration structures to build this frame
     AS_required_scratch_size: vk.DeviceSize,                                // Current total scratch size required by queued build infos
     TLAS_instance_buffer: Buffer_Handle,
-    
+
     // Pipeline layouts used for all pipelines
     gfx_pipeline_layout: vk.PipelineLayout,
     compute_pipeline_layout: vk.PipelineLayout,
@@ -375,13 +374,13 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
                 // Query this physical device's properties
                 vk12_props: vk.PhysicalDeviceVulkan12Properties
                 props: vk.PhysicalDeviceProperties2
-    
+
                 vk12_props.sType = .PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES
                 props.sType = .PHYSICAL_DEVICE_PROPERTIES_2
-    
+
                 props.pNext = &vk12_props
                 vk.GetPhysicalDeviceProperties2(pd, &props)
-    
+
                 // @TODO: Do something more sophisticated than picking the first device of a preferred type
                 if props.properties.deviceType == device_type {
                     log.debugf("Considering physical device:\t%v", string_from_bytes(props.properties.deviceName[:]))
@@ -394,7 +393,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
                     accel_features: vk.PhysicalDeviceAccelerationStructureFeaturesKHR
                     rt_pipeline_features: vk.PhysicalDeviceRayTracingPipelineFeaturesKHR
                     ray_query_features: vk.PhysicalDeviceRayQueryFeaturesKHR
-    
+
                     vulkan_11_features.sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES
                     vulkan_12_features.sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
                     dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
@@ -403,7 +402,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
                     rt_pipeline_features.sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR
                     ray_query_features.sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR
                     features.sType = .PHYSICAL_DEVICE_FEATURES_2
-    
+
                     rt_pipeline_features.pNext = &ray_query_features
                     accel_features.pNext = &rt_pipeline_features
                     vulkan_11_features.pNext = &accel_features
@@ -1001,7 +1000,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
             tex_data[i + 2] = result
             tex_data[i + 3] = 0xFF
         }
-        
+
         info := Image_Create {
             flags = nil,
             image_type = .D2,
@@ -3624,7 +3623,7 @@ create_acceleration_structure :: proc(
 
         // Update required scratch buffer size
         gd.AS_required_scratch_size += build_sizes.buildScratchSize
-        
+
         offset := gd.BLAS_head
         if (create_info.type == .TOP_LEVEL) {
             // Will the TLAS fit into 1/nth of the remaining AS_buffer space?
@@ -3721,7 +3720,7 @@ cmd_build_acceleration_structures :: proc(
     // If scratch size is larger than current scratch buffer, reallocate scratch buffer
     if gd.AS_scratch_size < gd.AS_required_scratch_size {
         delete_buffer(gd, gd.AS_scratch_buffer)
-    
+
         info := Buffer_Info {
             size = gd.AS_required_scratch_size,
             usage = {.STORAGE_BUFFER},
@@ -3818,7 +3817,7 @@ cmd_build_acceleration_structures :: proc(
             size = vk.DeviceSize(vk.WHOLE_SIZE),
         }
     }, {})
-    
+
     gd.AS_required_scratch_size = 0
 }
 
