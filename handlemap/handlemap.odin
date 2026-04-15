@@ -9,10 +9,10 @@ Handle :: struct {
 	index:      u32,
 }
 
-handle_to_rawptr :: proc(using h: $T/Handle) -> rawptr {
+handle_to_rawptr :: proc(h: $T/Handle) -> rawptr {
 	u: uintptr
-	u |= (uintptr(generation) << 32)
-	u |= (uintptr(index) << 0)
+	u |= (uintptr(h.generation) << 32)
+	u |= (uintptr(h.index) << 0)
 	return rawptr(u)
 }
 
