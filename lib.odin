@@ -25,27 +25,6 @@ MAX_TLAS_INSTANCES :: 16 * 1024
 
 PIPELINE_CACHE_FILENAME :: ".shadercache"
 
-create_write_file :: proc(filename: string) -> (os.Handle, os.Error) {
-    h: os.Handle
-
-    err: os.Errno
-    when ODIN_OS == .Windows {
-        h, err = os.open(
-            filename,
-            os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-        )
-    }
-    when ODIN_OS == .Linux {
-        h, err = os.open(
-            filename,
-            os.O_WRONLY | os.O_CREATE | os.O_TRUNC,
-            os.S_IRUSR | os.S_IWUSR
-        )
-    }
-
-    return h, err
-}
-
 size_to_alignment :: proc(size: $T, alignment: T) -> T {
     assert(alignment > 0)
     return (size + (alignment - 1)) & ~(alignment - 1)
@@ -1027,14 +1006,14 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
     // Initialize pipeline cache
     {
         // Check for existance of existing cache
-        pipeline_cache_bytes, cache_exists := os.read_entire_file_from_filename(PIPELINE_CACHE_FILENAME)
+        pipeline_cache_bytes, err := os.read_entire_file_from_path(PIPELINE_CACHE_FILENAME, context.temp_allocator)
         data_ptr: rawptr
         data_size: int
-        if cache_exists {
+        if err == nil {
             data_ptr = &pipeline_cache_bytes[0]
             data_size = len(pipeline_cache_bytes)
         } else {
-            log.warn("Didn't find shader cache.")
+            log.warnf("Error loading shader cache: %v", err)
         }
 
         info := vk.PipelineCacheCreateInfo {
@@ -1071,7 +1050,7 @@ quit_vulkan :: proc(gd: ^GraphicsDevice) {
             log.errorf("Error getting pipeline cache data: %v", res)
         }
 
-        cache_file, err := create_write_file(PIPELINE_CACHE_FILENAME)
+        cache_file, err := os.create(PIPELINE_CACHE_FILENAME)
         if err == nil {
             os.write(cache_file, pipeline_data[:])
         } else {
@@ -2823,23 +2802,21 @@ cmd_gfx_pipeline_barriers :: proc(
 
     im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(image_barriers), context.temp_allocator)
     for barrier in image_barriers {
-        using barrier
-
         append(
             &im_barriers,
             vk.ImageMemoryBarrier2 {
                 sType = .IMAGE_MEMORY_BARRIER_2,
                 pNext = nil,
-                srcStageMask = src_stage_mask,
-                srcAccessMask = src_access_mask,
-                dstStageMask = dst_stage_mask,
-                dstAccessMask = dst_access_mask,
-                oldLayout = old_layout,
-                newLayout = new_layout,
-                srcQueueFamilyIndex = src_queue_family,
-                dstQueueFamilyIndex = dst_queue_family,
-                image = image,
-                subresourceRange = subresource_range
+                srcStageMask = barrier.src_stage_mask,
+                srcAccessMask = barrier.src_access_mask,
+                dstStageMask = barrier.dst_stage_mask,
+                dstAccessMask = barrier.dst_access_mask,
+                oldLayout = barrier.old_layout,
+                newLayout = barrier.new_layout,
+                srcQueueFamilyIndex = barrier.src_queue_family,
+                dstQueueFamilyIndex = barrier.dst_queue_family,
+                image = barrier.image,
+                subresourceRange = barrier.subresource_range
             }
         )
     }
@@ -2887,23 +2864,21 @@ cmd_compute_pipeline_barriers :: proc(
 
     im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(buffer_barriers), allocator = context.temp_allocator)
     for barrier in image_barriers {
-        using barrier
-
         append(
             &im_barriers,
             vk.ImageMemoryBarrier2 {
                 sType = .IMAGE_MEMORY_BARRIER_2,
                 pNext = nil,
-                srcStageMask = src_stage_mask,
-                srcAccessMask = src_access_mask,
-                dstStageMask = dst_stage_mask,
-                dstAccessMask = dst_access_mask,
-                oldLayout = old_layout,
-                newLayout = new_layout,
-                srcQueueFamilyIndex = src_queue_family,
-                dstQueueFamilyIndex = dst_queue_family,
-                image = image,
-                subresourceRange = subresource_range
+                srcStageMask = barrier.src_stage_mask,
+                srcAccessMask = barrier.src_access_mask,
+                dstStageMask = barrier.dst_stage_mask,
+                dstAccessMask = barrier.dst_access_mask,
+                oldLayout = barrier.old_layout,
+                newLayout = barrier.new_layout,
+                srcQueueFamilyIndex = barrier.src_queue_family,
+                dstQueueFamilyIndex = barrier.dst_queue_family,
+                image = barrier.image,
+                subresourceRange = barrier.subresource_range
             }
         )
     }
@@ -2951,23 +2926,21 @@ cmd_transfer_pipeline_barriers :: proc(
 
     im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(image_barriers), context.temp_allocator)
     for barrier in image_barriers {
-        using barrier
-
         append(
             &im_barriers,
             vk.ImageMemoryBarrier2 {
                 sType = .IMAGE_MEMORY_BARRIER_2,
                 pNext = nil,
-                srcStageMask = src_stage_mask,
-                srcAccessMask = src_access_mask,
-                dstStageMask = dst_stage_mask,
-                dstAccessMask = dst_access_mask,
-                oldLayout = old_layout,
-                newLayout = new_layout,
-                srcQueueFamilyIndex = src_queue_family,
-                dstQueueFamilyIndex = dst_queue_family,
-                image = image,
-                subresourceRange = subresource_range
+                srcStageMask = barrier.src_stage_mask,
+                srcAccessMask = barrier.src_access_mask,
+                dstStageMask = barrier.dst_stage_mask,
+                dstAccessMask = barrier.dst_access_mask,
+                oldLayout = barrier.old_layout,
+                newLayout = barrier.new_layout,
+                srcQueueFamilyIndex = barrier.src_queue_family,
+                dstQueueFamilyIndex = barrier.dst_queue_family,
+                image = barrier.image,
+                subresourceRange = barrier.subresource_range
             }
         )
     }
