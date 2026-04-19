@@ -23,6 +23,13 @@ handle_to_rawptr :: proc(h: $T/Handle) -> rawptr {
 	return rawptr(u)
 }
 
+u64_to_handle :: proc(r: u64) -> Handle {
+	return Handle {
+		generation = u32(r >> 32),
+		index = u32(r & 0xFFFFFFFF)
+	}
+}
+
 rawptr_to_handle :: proc(r: rawptr) -> Handle {
 	u := uintptr(r)
 
