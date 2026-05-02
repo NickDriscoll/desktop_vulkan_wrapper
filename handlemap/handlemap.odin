@@ -84,7 +84,7 @@ has_handle :: proc(m: $M/Handle_Map($T), h: $H/Handle) -> bool {
 }
 
 @(require_results)
-get :: proc(m: ^$M/Handle_Map($T), h: $H/Handle) -> (^T, bool) {
+get :: proc(m: $M/Handle_Map($T), h: $H/Handle) -> (^T, bool) {
 	if h.index < u32(len(m.sparse_indices)) {
 		entry := m.sparse_indices[h.index]
 		if entry.generation == h.generation {
