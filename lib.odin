@@ -1410,7 +1410,7 @@ create_buffer :: proc(gd: ^GraphicsDevice, buf_info: ^Buffer_Info) -> Buffer_Han
 }
 
 get_buffer :: proc(gd: ^GraphicsDevice, handle: Buffer_Handle) -> (^Buffer, bool) {
-    return hm.get(&gd.buffers, hm.Handle(handle))
+    return hm.get(gd.buffers, hm.Handle(handle))
 }
 
 // Blocking function for writing to a GPU buffer
@@ -1487,7 +1487,7 @@ sync_write_buffer :: proc(
                 build_submit_infos(gd, &signal_infos, sync.signal_ops)
 
                 // Increment transfer timeline counter
-                semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+                semaphore := hm.get(gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
                 new_timeline_value := gd.transfers_completed + 1
                 signal_info := vk.SemaphoreSubmitInfo {
                     sType = .SEMAPHORE_SUBMIT_INFO,
@@ -1518,7 +1518,7 @@ sync_write_buffer :: proc(
             // CPU wait
             // @TODO: Should be able to get rid of this wait by having
             // gfx queue wait on transfer timeline semaphore
-            semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+            semaphore := hm.get(gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
             new_timeline_value := gd.transfers_completed + 1
             wait_info := vk.SemaphoreWaitInfo {
                 sType = .SEMAPHORE_WAIT_INFO,
@@ -1751,7 +1751,7 @@ create_image :: proc(gd: ^GraphicsDevice, image_info: ^Image_Create) -> Texture_
 
 new_bindless_image :: proc(gd: ^GraphicsDevice, info: ^Image_Create, layout: vk.ImageLayout) -> Texture_Handle {
     handle := create_image(gd, info)
-    image, ok := hm.get(&gd.images, hm.Handle(handle))
+    image, ok := hm.get(gd.images, hm.Handle(handle))
     if !ok {
         log.error("Error in new_bindless_image()")
     }
@@ -1804,7 +1804,7 @@ new_bindless_image :: proc(gd: ^GraphicsDevice, info: ^Image_Create, layout: vk.
         pInheritanceInfo = nil
     })
 
-    semaphore, ok2 := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline))
+    semaphore, ok2 := hm.get(gd.semaphores, hm.Handle(gd.transfer_timeline))
     if !ok2 {
         log.error("Error getting transfer timeline semaphore")
     }
@@ -1884,11 +1884,11 @@ new_bindless_image :: proc(gd: ^GraphicsDevice, info: ^Image_Create, layout: vk.
 }
 
 get_image :: proc(gd: ^GraphicsDevice, handle: Texture_Handle) -> (^Image, bool) {
-    return hm.get(&gd.images, hm.Handle(handle))
+    return hm.get(gd.images, hm.Handle(handle))
 }
 
 get_image_vkhandle :: proc(gd: ^GraphicsDevice, handle: Texture_Handle) -> (h: vk.Image, ok: bool) {
-    im := hm.get(&gd.images, hm.Handle(handle)) or_return
+    im := hm.get(gd.images, hm.Handle(handle)) or_return
     return im.image, true
 }
 
@@ -1901,16 +1901,16 @@ sync_create_image_with_data :: proc(
 ) -> (out_handle: Texture_Handle, ok: bool) {
     // Create image first
     out_handle = create_image(gd, create_info)
-    out_image := hm.get(&gd.images, hm.Handle(out_handle)) or_return
+    out_image := hm.get(gd.images, hm.Handle(out_handle)) or_return
 
     extent := &create_info.extent
 
     cb_idx := CommandBuffer_Index(in_flight_idx(gd))
     cb := gd.transfer_command_buffers[cb_idx]
-    semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+    semaphore := hm.get(gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
 
     // Staging buffer
-    sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
+    sb := hm.get(gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     sb_ptr := sb.alloc_info.mapped_data
 
     if !create_info.has_mipmaps {
@@ -2103,7 +2103,7 @@ sync_create_image_with_data :: proc(
 }
 
 delete_image :: proc(gd: ^GraphicsDevice, handle: Texture_Handle) -> bool {
-    image := hm.get(&gd.images, hm.Handle(handle)) or_return
+    image := hm.get(gd.images, hm.Handle(handle)) or_return
 
     image_delete := Image_Delete {
         death_frame = gd.frame_count + u64(gd.frames_in_flight),
@@ -2354,7 +2354,7 @@ build_submit_infos :: proc(
 ) -> bool {
     count := len(semaphore_ops)
     for i := 0; i < count; i += 1 {
-        sem := hm.get(&gd.semaphores, hm.Handle(semaphore_ops[i].semaphore)) or_return
+        sem := hm.get(gd.semaphores, hm.Handle(semaphore_ops[i].semaphore)) or_return
         submit_infos[i] = vk.SemaphoreSubmitInfo{
             sType = .SEMAPHORE_SUBMIT_INFO_KHR,
             pNext = nil,
@@ -2504,7 +2504,7 @@ Framebuffer :: struct {
 cmd_begin_render_pass :: proc(gd: ^GraphicsDevice, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
     cb := gd.gfx_command_buffers[cb_idx]
 
-    iv, ok := hm.get(&gd.images, hm.Handle(framebuffer.color_images[0]))
+    iv, ok := hm.get(gd.images, hm.Handle(framebuffer.color_images[0]))
     color_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO_KHR,
         pNext = nil,
@@ -2538,7 +2538,7 @@ cmd_begin_render_pass :: proc(gd: ^GraphicsDevice, cb_idx: CommandBuffer_Index, 
     }
 
     depth_attachment: vk.RenderingAttachmentInfo
-    depth_image, ok2 := hm.get(&gd.images, hm.Handle(framebuffer.depth_image))
+    depth_image, ok2 := hm.get(gd.images, hm.Handle(framebuffer.depth_image))
     if ok2 {
         depth_attachment = vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
@@ -2571,7 +2571,7 @@ cmd_bind_gfx_pipeline :: proc(
     handle: Pipeline_Handle
 ) -> bool {
     cb := gd.gfx_command_buffers[cb_idx]
-    pipeline := hm.get(&gd.pipelines, hm.Handle(handle)) or_return
+    pipeline := hm.get(gd.pipelines, hm.Handle(handle)) or_return
     vk.CmdBindPipeline(cb, .GRAPHICS, pipeline^)
     return true
 }
@@ -2582,7 +2582,7 @@ cmd_bind_compute_pipeline :: proc(
     handle: Pipeline_Handle
 ) -> bool {
     cb := gd.compute_command_buffers[cb_idx]
-    pipeline := hm.get(&gd.pipelines, hm.Handle(handle)) or_return
+    pipeline := hm.get(gd.pipelines, hm.Handle(handle)) or_return
     vk.CmdBindPipeline(cb, .COMPUTE, pipeline^)
     return true
 }
@@ -2724,7 +2724,7 @@ create_semaphore :: proc(gd: ^GraphicsDevice, info: ^Semaphore_Info) -> Semaphor
 }
 
 check_timeline_semaphore :: proc(gd: ^GraphicsDevice, handle: Semaphore_Handle) -> (val: u64, ok: bool) {
-    sem := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
+    sem := hm.get(gd.semaphores, hm.Handle(handle)) or_return
     v: u64
     if vk.GetSemaphoreCounterValue(gd.device, sem^, &v) != .SUCCESS {
         log.error("Failed to read value from timeline semaphore")
@@ -2734,11 +2734,11 @@ check_timeline_semaphore :: proc(gd: ^GraphicsDevice, handle: Semaphore_Handle) 
 }
 
 get_semaphore :: proc(gd: ^GraphicsDevice, handle: Semaphore_Handle) -> (^vk.Semaphore, bool) {
-    return hm.get(&gd.semaphores, hm.Handle(handle))
+    return hm.get(gd.semaphores, hm.Handle(handle))
 }
 
 destroy_semaphore :: proc(gd: ^GraphicsDevice, handle: Semaphore_Handle) -> bool {
-    semaphore := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
+    semaphore := hm.get(gd.semaphores, hm.Handle(handle)) or_return
     vk.DestroySemaphore(gd.device, semaphore^, gd.alloc_callbacks)
 
     return true
@@ -3648,12 +3648,12 @@ create_acceleration_structure :: proc(
 }
 
 get_acceleration_structure :: proc(gd: ^GraphicsDevice, handle: Acceleration_Structure_Handle) -> (^AccelerationStructure, bool) {
-    as, b := hm.get(&gd.acceleration_structures, handle)
+    as, b := hm.get(gd.acceleration_structures, handle)
     return as, b
 }
 
 get_acceleration_structure_address :: proc(gd: ^GraphicsDevice, handle: Acceleration_Structure_Handle) -> vk.DeviceAddress {
-    blas, _ := hm.get(&gd.acceleration_structures, handle)
+    blas, _ := hm.get(gd.acceleration_structures, handle)
     addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
         sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
         pNext = nil,
@@ -3663,7 +3663,7 @@ get_acceleration_structure_address :: proc(gd: ^GraphicsDevice, handle: Accelera
 }
 
 delete_acceleration_structure :: proc(gd: ^GraphicsDevice, handle: Acceleration_Structure_Handle) -> bool {
-    as := hm.get(&gd.acceleration_structures, handle) or_return
+    as := hm.get(gd.acceleration_structures, handle) or_return
     queue.append(&gd.AS_deletes, AS_Delete {
         death_frame = gd.frame_count + u64(gd.frames_in_flight),
         handle = as.handle
