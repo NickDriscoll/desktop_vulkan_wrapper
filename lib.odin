@@ -1574,7 +1574,10 @@ Image :: struct {
     image_view: vk.ImageView,
     allocation: vma.Allocation,
     alloc_info: vma.Allocation_Info,
-    extent: vk.Extent3D
+    extent: vk.Extent3D,
+    format: vk.Format,
+    mip_count: u32,
+    array_layers: u32,
 }
 Image_Delete :: struct {
     death_frame: u64,
@@ -1691,6 +1694,7 @@ create_image :: proc(gd: ^GraphicsDevice, image_info: ^Image_Create) -> Texture_
         }
     }
     image.extent = image_info.extent
+    image.format = image_info.format
 
     // Create the image view
     {
@@ -2100,6 +2104,188 @@ sync_create_image_with_data :: proc(
 
     ok = true
     return
+}
+
+sync_update_image_data :: proc(gd: ^GraphicsDevice, handle: Texture_Handle, subrect: vk.Rect2D, bytes: []byte) -> bool {
+    cb_idx := CommandBuffer_Index(in_flight_idx(gd))
+    cb := gd.transfer_command_buffers[cb_idx]
+    semaphore := hm.get(gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+
+    // Staging buffer
+    sb := hm.get(gd.buffers, hm.Handle(gd.staging_buffer)) or_return
+    sb_ptr := sb.alloc_info.mapped_data
+
+    existing_image, image_ok := get_image(gd, handle)
+    assert(image_ok)
+
+    aspect_mask := format_aspect_flags(existing_image.format)
+
+    bytes_per_pixel := u32(vk_format_pixel_size(existing_image.format))
+
+    bytes_size := len(bytes)
+    // if bytes_size > STAGING_BUFFER_SIZE {
+    //     log.errorf("Width: %v\nHeight: %v\nDepth: %v", create_info.extent.width, create_info.extent.height, create_info.extent.depth)
+    //     assert(false, "Image too big for staging buffer. Nick, stop being lazy.")
+    // }
+    amount_transferred := 0
+    for amount_transferred < bytes_size {
+        remaining_bytes := bytes_size - amount_transferred
+        iter_size := min(remaining_bytes, STAGING_BUFFER_SIZE)
+
+        // Copy data to staging buffer
+        p := &bytes[amount_transferred]
+        mem.copy(sb_ptr, p, iter_size)
+
+        // Begin transfer command buffer
+        begin_info := vk.CommandBufferBeginInfo {
+            sType = .COMMAND_BUFFER_BEGIN_INFO,
+            pNext = nil,
+            flags = {.ONE_TIME_SUBMIT},
+            pInheritanceInfo = nil
+        }
+        vk.BeginCommandBuffer(cb, &begin_info)
+
+        // Record image layout transition on first iteration
+        if amount_transferred == 0 {
+            barriers := []Image_Barrier {
+                {
+                    src_stage_mask = {},
+                    src_access_mask = {},
+                    dst_stage_mask = {.ALL_COMMANDS},
+                    dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+                    old_layout = .UNDEFINED,
+                    new_layout = .TRANSFER_DST_OPTIMAL,
+                    image = existing_image.image,
+                    subresource_range = {
+                        aspectMask = aspect_mask,
+                        baseMipLevel = 0,
+                        levelCount = existing_image.mip_count,
+                        baseArrayLayer = 0,
+                        layerCount = existing_image.array_layers
+                    }
+                }
+            }
+            cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
+        }
+
+        min_blocksize := u32(vk_format_block_size(existing_image.format))
+        buffer_offset: vk.DeviceSize = 0
+        copies := make([dynamic]vk.BufferImageCopy, 0, existing_image.array_layers * existing_image.mip_count, context.temp_allocator)
+        for current_layer in 0..<existing_image.array_layers {
+            for current_mip in 0..<existing_image.mip_count {
+                copy_extent := vk.Extent3D {
+                    width = max(subrect.extent.width, 1),
+                    height = max(subrect.extent.height, 1),
+                    depth = 1,
+                }
+
+                {
+                    image_copy := vk.BufferImageCopy {
+                        bufferOffset = buffer_offset,
+                        bufferRowLength = 0,
+                        bufferImageHeight = 0,
+                        imageSubresource = {
+                            aspectMask = aspect_mask,
+                            mipLevel = current_mip,
+                            baseArrayLayer = current_layer,
+                            layerCount = 1
+                        },
+                        imageOffset = {
+                            x = subrect.offset.x,
+                            y = subrect.offset.y,
+                            z = 0
+                        },
+                        imageExtent = copy_extent
+                    }
+                    append(&copies, image_copy)
+                }
+
+                buffer_offset += max(vk.DeviceSize(min_blocksize), vk.DeviceSize(bytes_per_pixel * copy_extent.width * copy_extent.height * copy_extent.depth))
+            }
+        }
+        vk.CmdCopyBufferToImage(cb, sb.buffer, existing_image.image, .TRANSFER_DST_OPTIMAL, u32(len(copies)), raw_data(copies))
+
+        // Record queue family ownership transfer on last iteration
+        // @TODO: Barrier is overly opinionated about future usage
+        if remaining_bytes <= STAGING_BUFFER_SIZE {
+            barriers := []Image_Barrier {
+                {
+                    src_stage_mask = {.TRANSFER},
+                    src_access_mask = {.TRANSFER_WRITE},
+                    dst_stage_mask = {.ALL_COMMANDS},                      // Ignored during release operation
+                    dst_access_mask = {.MEMORY_READ},                      // Ignored during release operation
+                    old_layout = .TRANSFER_DST_OPTIMAL,
+                    new_layout = .SHADER_READ_ONLY_OPTIMAL,
+                    src_queue_family = gd.transfer_queue_family,
+                    dst_queue_family = gd.gfx_queue_family,
+                    image = existing_image.image,
+                    subresource_range = {
+                        aspectMask = {.COLOR},
+                        baseMipLevel = 0,
+                        levelCount = existing_image.mip_count,
+                        baseArrayLayer = 0,
+                        layerCount = existing_image.array_layers
+                    }
+                }
+            }
+            cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
+        }
+
+        vk.EndCommandBuffer(cb)
+
+        // Actually submit this lonesome command to the transfer queue
+        cb_info := vk.CommandBufferSubmitInfo {
+            sType = .COMMAND_BUFFER_SUBMIT_INFO,
+            pNext = nil,
+            commandBuffer = cb,
+            deviceMask = 0
+        }
+
+        // Increment transfer timeline counter
+        new_timeline_value := gd.transfers_completed + 1
+        signal_info := vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            pNext = nil,
+            semaphore = semaphore^,
+            value = new_timeline_value,
+            stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+            deviceIndex = 0
+        }
+
+        submit_info := vk.SubmitInfo2 {
+            sType = .SUBMIT_INFO_2,
+            pNext = nil,
+            flags = nil,
+            commandBufferInfoCount = 1,
+            pCommandBufferInfos = &cb_info,
+            signalSemaphoreInfoCount = 1,
+            pSignalSemaphoreInfos = &signal_info
+        }
+        res := vk.QueueSubmit2(gd.transfer_queue, 1, &submit_info, 0)
+        if res != .SUCCESS {
+            log.errorf("Failed to submit to transfer queue: %v", res)
+        }
+
+        // CPU wait
+        wait_info := vk.SemaphoreWaitInfo {
+            sType = .SEMAPHORE_WAIT_INFO,
+            pNext = nil,
+            flags = nil,
+            semaphoreCount = 1,
+            pSemaphores = semaphore,
+            pValues = &new_timeline_value
+        }
+        if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
+            log.error("Failed to wait for transfer semaphore.")
+        }
+        log.debugf("Transferred %v bytes of image data to image handle %v", iter_size, existing_image)
+
+        gd.transfers_completed += 1
+        amount_transferred += iter_size
+    }
+
+
+    return true
 }
 
 delete_image :: proc(gd: ^GraphicsDevice, handle: Texture_Handle) -> bool {
