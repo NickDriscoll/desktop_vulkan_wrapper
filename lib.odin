@@ -154,6 +154,12 @@ GraphicsDevice :: struct {
     next_gfx_command_buffer: u32,
     next_compute_command_buffer: u32,
 
+    // I need this to transfer images back to the transfer queue
+    // e.g. for Dear ImGUI texture updates
+    scratch_gfx_comand_buffer: vk.CommandBuffer,
+    scratch_semaphore: Semaphore_Handle,
+    scratch_semaphore_value: u64,
+
     // All users of this Vulkan wrapper will access
     // buffers via their device addresses and
     // images through this global descriptor set
@@ -169,6 +175,7 @@ GraphicsDevice :: struct {
     staging_buffer_offest: u64,
     transfer_timeline: Semaphore_Handle,
     transfers_completed: u64,
+    frame_count_semaphore: Semaphore_Handle,
 
     // Acceleration structure state
     AS_buffer: Buffer_Handle,                                               // Stores built acceleration structures
@@ -622,7 +629,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
         gfx_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
             pNext = nil,
-            flags = {vk.CommandPoolCreateFlag.TRANSIENT, vk.CommandPoolCreateFlag.RESET_COMMAND_BUFFER},
+            flags = {.TRANSIENT, .RESET_COMMAND_BUFFER},
             queueFamilyIndex = gd.gfx_queue_family
         }
         if vk.CreateCommandPool(gd.device, &gfx_pool_info, params.allocation_callbacks, &gd.gfx_command_pool) != .SUCCESS {
@@ -633,7 +640,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
         compute_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
             pNext = nil,
-            flags = {vk.CommandPoolCreateFlag.TRANSIENT, vk.CommandPoolCreateFlag.RESET_COMMAND_BUFFER},
+            flags = {.TRANSIENT, .RESET_COMMAND_BUFFER},
             queueFamilyIndex = gd.compute_queue_family
         }
         if vk.CreateCommandPool(gd.device, &compute_pool_info, params.allocation_callbacks, &gd.compute_command_pool) != .SUCCESS {
@@ -644,7 +651,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
         transfer_pool_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
             pNext = nil,
-            flags = {vk.CommandPoolCreateFlag.TRANSIENT, vk.CommandPoolCreateFlag.RESET_COMMAND_BUFFER},
+            flags = {.TRANSIENT, .RESET_COMMAND_BUFFER},
             queueFamilyIndex = gd.transfer_queue_family
         }
         if vk.CreateCommandPool(gd.device, &transfer_pool_info, params.allocation_callbacks, &gd.transfer_command_pool) != .SUCCESS {
@@ -668,6 +675,16 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
         }
         if vk.AllocateCommandBuffers(gd.device, &gfx_info, &gd.gfx_command_buffers[0]) != .SUCCESS {
             log.error("Failed to create gfx command buffers")
+        }
+        scratch_info := vk.CommandBufferAllocateInfo {
+            sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+            pNext = nil,
+            commandPool = gd.gfx_command_pool,
+            level = .PRIMARY,
+            commandBufferCount = 1
+        }
+        if vk.AllocateCommandBuffers(gd.device, &scratch_info, &gd.scratch_gfx_comand_buffer) != .SUCCESS {
+            log.error("Failed to create scratch command buffer")
         }
         compute_info := vk.CommandBufferAllocateInfo {
             sType = .COMMAND_BUFFER_ALLOCATE_INFO,
@@ -955,6 +972,16 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
         })
     }
 
+    // Create gfx timeline semaphore
+    {
+        info := Semaphore_Info {
+            type = .TIMELINE,
+            init_value = 0,
+            name = "Frame count timeline"
+        }
+        gd.frame_count_semaphore = create_semaphore(&gd, &info)
+    }
+
     // Create transfer timeline semaphore
     {
         info := Semaphore_Info {
@@ -963,6 +990,16 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
             name = "Transfer timeline"
         }
         gd.transfer_timeline = create_semaphore(&gd, &info)
+    }
+
+    // Create scratch semaphore
+    {
+        info := Semaphore_Info {
+            type = .TIMELINE,
+            init_value = 0,
+            name = "Scratch semaphore"
+        }
+        gd.scratch_semaphore = create_semaphore(&gd, &info)
     }
 
     // Put null texture in slot 0
@@ -1139,7 +1176,8 @@ wait_timeline_semaphore :: proc(gd: ^GraphicsDevice, semaphore: Semaphore_Handle
     }
 }
 
-wait_frames_in_flight :: proc(gd: ^GraphicsDevice, semaphore: Semaphore_Handle) {
+wait_frames_in_flight :: proc(gd: ^GraphicsDevice) {
+    semaphore := gd.frame_count_semaphore
     if gd.frame_count >= u64(gd.frames_in_flight) {
         //scoped_event(&profiler, "GFX timeline semaphore wait")
         wait_value := gd.frame_count - u64(gd.frames_in_flight) + 1
@@ -1147,19 +1185,18 @@ wait_frames_in_flight :: proc(gd: ^GraphicsDevice, semaphore: Semaphore_Handle) 
     }
 }
 
+@(disabled=!ODIN_DEBUG)
 assign_debug_name :: proc(device: vk.Device, object_type: vk.ObjectType, object_handle: u64, name: cstring) {
-    when ODIN_DEBUG {
-        name_info := vk.DebugUtilsObjectNameInfoEXT {
-            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
-            pNext = nil,
-            objectType = object_type,
-            objectHandle = object_handle,
-            pObjectName = name
-        }
-        r := vk.SetDebugUtilsObjectNameEXT(device, &name_info)
-        if r != .SUCCESS {
-            log.errorf("Failed to set object's debug name: %v", r)
-        }
+    name_info := vk.DebugUtilsObjectNameInfoEXT {
+        sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+        pNext = nil,
+        objectType = object_type,
+        objectHandle = object_handle,
+        pObjectName = name
+    }
+    r := vk.SetDebugUtilsObjectNameEXT(device, &name_info)
+    if r != .SUCCESS {
+        log.errorf("Failed to set object's debug name: %v", r)
     }
 }
 
@@ -1480,8 +1517,8 @@ sync_write_buffer :: proc(
             }
 
             // Honor sync info
-            wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.wait_ops), allocator = context.temp_allocator)
-            signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.signal_ops), allocator = context.temp_allocator)
+            wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, 0, len(sync.wait_ops), allocator = context.temp_allocator)
+            signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, 0, len(sync.signal_ops), allocator = context.temp_allocator)
             {
                 build_submit_infos(gd, &wait_infos, sync.wait_ops)
                 build_submit_infos(gd, &signal_infos, sync.signal_ops)
@@ -2106,17 +2143,112 @@ sync_create_image_with_data :: proc(
     return
 }
 
-sync_update_image_data :: proc(gd: ^GraphicsDevice, handle: Texture_Handle, subrect: vk.Rect2D, bytes: []byte) -> bool {
+sync_update_image_data :: proc(
+    gd: ^GraphicsDevice, 
+    handle: Texture_Handle, 
+    subrect: vk.Rect2D,
+    mip_level: u32,
+    array_layer: u32,
+    bytes: []byte,
+) -> bool {
+    existing_image, image_ok := get_image(gd, handle)
+    assert(image_ok)
+
+    // Begin info used by multiple begins in the proc
+    begin_info := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        pNext = nil,
+        flags = {.ONE_TIME_SUBMIT},
+        pInheritanceInfo = nil
+    }
+
     cb_idx := CommandBuffer_Index(in_flight_idx(gd))
-    cb := gd.transfer_command_buffers[cb_idx]
-    semaphore := hm.get(gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+    gfx_cb := gd.scratch_gfx_comand_buffer
+    transfer_cb := gd.transfer_command_buffers[cb_idx]
+    scratch_sem, ok := get_semaphore(gd, gd.scratch_semaphore)
+    assert(ok)
+    semaphore, ok2 := get_semaphore(gd, gd.transfer_timeline)
+    assert(ok2)
+    gfx_sem, ok3 := get_semaphore(gd, gd.frame_count_semaphore)
+    assert(ok3)
+
+    // Submit gfx cb to give image to transfer queue
+    {
+        // Need to transfer image fron gfx queue to transfer queue
+        vk.BeginCommandBuffer(gfx_cb, &begin_info)
+        cmd_gfx_pipeline_barriers(gd, cb_idx, {}, {
+            Image_Barrier {
+                src_stage_mask = {.FRAGMENT_SHADER},
+                src_access_mask = {.SHADER_READ},
+                dst_stage_mask = {.TRANSFER},
+                dst_access_mask = {.TRANSFER_WRITE},
+                old_layout = .SHADER_READ_ONLY_OPTIMAL,
+                new_layout = .TRANSFER_DST_OPTIMAL,
+                src_queue_family = gd.gfx_queue_family,
+                dst_queue_family = gd.transfer_queue_family,
+                image = existing_image.image,
+                subresource_range = {
+                    aspectMask = format_aspect_flags(existing_image.format),
+                    baseMipLevel = mip_level,
+                    baseArrayLayer = array_layer,
+                    levelCount = existing_image.mip_count,
+                    layerCount = existing_image.array_layers,
+                }
+            }
+        })
+        vk.EndCommandBuffer(gfx_cb)
+
+        cb_info := vk.CommandBufferSubmitInfo {
+            sType = .COMMAND_BUFFER_SUBMIT_INFO,
+            pNext = nil,
+            commandBuffer = gfx_cb,
+            deviceMask = 0
+        }
+        
+        // Signal the scratch semaphore
+        new_timeline_value := gd.scratch_semaphore_value + 1
+        signal_info := vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            pNext = nil,
+            semaphore = scratch_sem^,
+            value = new_timeline_value,
+            stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+            deviceIndex = 0
+        }
+
+        // Wait for graphics queue to fully catch up,
+        // as the texture we're updating might otherwise
+        // be in use
+        wait_info := vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            pNext = nil,
+            semaphore = gfx_sem^,
+            value = gd.frame_count,
+            stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+            deviceIndex = 0
+        }
+        
+        submit_info := vk.SubmitInfo2 {
+            sType = .SUBMIT_INFO_2,
+            pNext = nil,
+            flags = nil,
+            commandBufferInfoCount = 1,
+            pCommandBufferInfos = &cb_info,
+            waitSemaphoreInfoCount = 1,
+            pWaitSemaphoreInfos = &wait_info,
+            signalSemaphoreInfoCount = 1,
+            pSignalSemaphoreInfos = &signal_info
+        }
+        res := vk.QueueSubmit2(gd.gfx_queue, 1, &submit_info, 0)
+        if res != .SUCCESS {
+            log.errorf("Failed to submit to gfx queue: %v", res)
+        }
+        gd.scratch_semaphore_value += 1
+    }
 
     // Staging buffer
     sb := hm.get(gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     sb_ptr := sb.alloc_info.mapped_data
-
-    existing_image, image_ok := get_image(gd, handle)
-    assert(image_ok)
 
     aspect_mask := format_aspect_flags(existing_image.format)
 
@@ -2137,35 +2269,31 @@ sync_update_image_data :: proc(gd: ^GraphicsDevice, handle: Texture_Handle, subr
         mem.copy(sb_ptr, p, iter_size)
 
         // Begin transfer command buffer
-        begin_info := vk.CommandBufferBeginInfo {
-            sType = .COMMAND_BUFFER_BEGIN_INFO,
-            pNext = nil,
-            flags = {.ONE_TIME_SUBMIT},
-            pInheritanceInfo = nil
-        }
-        vk.BeginCommandBuffer(cb, &begin_info)
+        vk.BeginCommandBuffer(transfer_cb, &begin_info)
 
         // Record image layout transition on first iteration
         if amount_transferred == 0 {
-            barriers := []Image_Barrier {
-                {
-                    src_stage_mask = {},
-                    src_access_mask = {},
-                    dst_stage_mask = {.ALL_COMMANDS},
-                    dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
-                    old_layout = .UNDEFINED,
+            // Receive image from gfx queue on transfer queue
+            cmd_transfer_pipeline_barriers(gd, cb_idx, {}, {
+                Image_Barrier {
+                    src_stage_mask = {.FRAGMENT_SHADER},
+                    src_access_mask = {.SHADER_READ},
+                    dst_stage_mask = {.TRANSFER},
+                    dst_access_mask = {.TRANSFER_WRITE},
+                    old_layout = .SHADER_READ_ONLY_OPTIMAL,
                     new_layout = .TRANSFER_DST_OPTIMAL,
+                    src_queue_family = gd.gfx_queue_family,
+                    dst_queue_family = gd.transfer_queue_family,
                     image = existing_image.image,
                     subresource_range = {
-                        aspectMask = aspect_mask,
-                        baseMipLevel = 0,
-                        levelCount = existing_image.mip_count,
-                        baseArrayLayer = 0,
-                        layerCount = existing_image.array_layers
+                        aspectMask = format_aspect_flags(existing_image.format),
+                        baseMipLevel = mip_level,
+                        baseArrayLayer = array_layer,
+                        levelCount = 1,
+                        layerCount = 1,
                     }
                 }
-            }
-            cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
+            })
         }
 
         min_blocksize := u32(vk_format_block_size(existing_image.format))
@@ -2203,7 +2331,7 @@ sync_update_image_data :: proc(gd: ^GraphicsDevice, handle: Texture_Handle, subr
                 buffer_offset += max(vk.DeviceSize(min_blocksize), vk.DeviceSize(bytes_per_pixel * copy_extent.width * copy_extent.height * copy_extent.depth))
             }
         }
-        vk.CmdCopyBufferToImage(cb, sb.buffer, existing_image.image, .TRANSFER_DST_OPTIMAL, u32(len(copies)), raw_data(copies))
+        vk.CmdCopyBufferToImage(transfer_cb, sb.buffer, existing_image.image, .TRANSFER_DST_OPTIMAL, u32(len(copies)), raw_data(copies))
 
         // Record queue family ownership transfer on last iteration
         // @TODO: Barrier is overly opinionated about future usage
@@ -2213,7 +2341,7 @@ sync_update_image_data :: proc(gd: ^GraphicsDevice, handle: Texture_Handle, subr
                     src_stage_mask = {.TRANSFER},
                     src_access_mask = {.TRANSFER_WRITE},
                     dst_stage_mask = {.ALL_COMMANDS},                      // Ignored during release operation
-                    dst_access_mask = {.MEMORY_READ},                      // Ignored during release operation
+                    dst_access_mask = {.SHADER_READ},                      // Ignored during release operation
                     old_layout = .TRANSFER_DST_OPTIMAL,
                     new_layout = .SHADER_READ_ONLY_OPTIMAL,
                     src_queue_family = gd.transfer_queue_family,
@@ -2231,13 +2359,13 @@ sync_update_image_data :: proc(gd: ^GraphicsDevice, handle: Texture_Handle, subr
             cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
         }
 
-        vk.EndCommandBuffer(cb)
+        vk.EndCommandBuffer(transfer_cb)
 
         // Actually submit this lonesome command to the transfer queue
         cb_info := vk.CommandBufferSubmitInfo {
             sType = .COMMAND_BUFFER_SUBMIT_INFO,
             pNext = nil,
-            commandBuffer = cb,
+            commandBuffer = transfer_cb,
             deviceMask = 0
         }
 
@@ -2252,12 +2380,23 @@ sync_update_image_data :: proc(gd: ^GraphicsDevice, handle: Texture_Handle, subr
             deviceIndex = 0
         }
 
+        wait_info := vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            pNext = nil,
+            semaphore = scratch_sem^,
+            value = gd.scratch_semaphore_value,
+            stageMask = {.ALL_COMMANDS},
+            deviceIndex = 0
+        }
+
         submit_info := vk.SubmitInfo2 {
             sType = .SUBMIT_INFO_2,
             pNext = nil,
             flags = nil,
             commandBufferInfoCount = 1,
             pCommandBufferInfos = &cb_info,
+            waitSemaphoreInfoCount = 1,
+            pWaitSemaphoreInfos = &wait_info,
             signalSemaphoreInfoCount = 1,
             pSignalSemaphoreInfos = &signal_info
         }
@@ -2265,25 +2404,96 @@ sync_update_image_data :: proc(gd: ^GraphicsDevice, handle: Texture_Handle, subr
         if res != .SUCCESS {
             log.errorf("Failed to submit to transfer queue: %v", res)
         }
-
-        // CPU wait
-        wait_info := vk.SemaphoreWaitInfo {
-            sType = .SEMAPHORE_WAIT_INFO,
-            pNext = nil,
-            flags = nil,
-            semaphoreCount = 1,
-            pSemaphores = semaphore,
-            pValues = &new_timeline_value
-        }
-        if vk.WaitSemaphores(gd.device, &wait_info, max(u64)) != .SUCCESS {
-            log.error("Failed to wait for transfer semaphore.")
-        }
         log.debugf("Transferred %v bytes of image data to image handle %v", iter_size, existing_image)
 
         gd.transfers_completed += 1
         amount_transferred += iter_size
     }
+    
+    // Receive transfer from transfer queue to gfx queue
+    {
+        // Need to transfer image fron gfx queue to transfer queue
+        vk.BeginCommandBuffer(gfx_cb, &begin_info)
+        cmd_gfx_pipeline_barriers(gd, cb_idx, {}, {
+            Image_Barrier {
+                src_stage_mask = {.FRAGMENT_SHADER},
+                src_access_mask = {.SHADER_READ},
+                dst_stage_mask = {.TRANSFER},
+                dst_access_mask = {.TRANSFER_WRITE},
+                old_layout = .SHADER_READ_ONLY_OPTIMAL,
+                new_layout = .TRANSFER_DST_OPTIMAL,
+                src_queue_family = gd.gfx_queue_family,
+                dst_queue_family = gd.transfer_queue_family,
+                image = existing_image.image,
+                subresource_range = {
+                    aspectMask = format_aspect_flags(existing_image.format),
+                    baseMipLevel = mip_level,
+                    baseArrayLayer = array_layer,
+                    levelCount = existing_image.mip_count,
+                    layerCount = existing_image.array_layers,
+                }
+            }
+        })
+        vk.EndCommandBuffer(gfx_cb)
 
+        cb_info := vk.CommandBufferSubmitInfo {
+            sType = .COMMAND_BUFFER_SUBMIT_INFO,
+            pNext = nil,
+            commandBuffer = gfx_cb,
+            deviceMask = 0
+        }
+        
+        // Signal the scratch semaphore
+        new_timeline_value := gd.scratch_semaphore_value + 1
+        signal_info := vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            pNext = nil,
+            semaphore = scratch_sem^,
+            value = new_timeline_value,
+            stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
+            deviceIndex = 0
+        }
+
+        wait_info := vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            pNext = nil,
+            semaphore = scratch_sem^,
+            value = gd.scratch_semaphore_value,
+            stageMask = {.ALL_COMMANDS},
+            deviceIndex = 0
+        }
+        
+        submit_info := vk.SubmitInfo2 {
+            sType = .SUBMIT_INFO_2,
+            pNext = nil,
+            flags = nil,
+            commandBufferInfoCount = 1,
+            pCommandBufferInfos = &cb_info,
+            waitSemaphoreInfoCount = 1,
+            pWaitSemaphoreInfos = &wait_info,
+            signalSemaphoreInfoCount = 1,
+            pSignalSemaphoreInfos = &signal_info
+        }
+        res := vk.QueueSubmit2(gd.gfx_queue, 1, &submit_info, 0)
+        if res != .SUCCESS {
+            log.errorf("Failed to submit to gfx queue: %v", res)
+        }
+
+        // CPU wait
+        // @TODO: Get rid of this it shouldn't even be that hard
+        cpu_wait_info := vk.SemaphoreWaitInfo {
+            sType = .SEMAPHORE_WAIT_INFO,
+            pNext = nil,
+            flags = nil,
+            semaphoreCount = 1,
+            pSemaphores = scratch_sem,
+            pValues = &new_timeline_value
+        }
+        if vk.WaitSemaphores(gd.device, &cpu_wait_info, max(u64)) != .SUCCESS {
+            log.error("Failed to wait for transfer semaphore.")
+        }
+        gd.scratch_semaphore_value += 1
+    }
 
     return true
 }
@@ -2444,6 +2654,8 @@ begin_gfx_command_buffer :: proc(
         log.error("Unable to begin gfx command buffer.")
     }
 
+    vk.CmdBindDescriptorSets(cb, .GRAPHICS, gd.gfx_pipeline_layout, 0, 1, &gd.descriptor_set, 0, nil)
+
     // Do per-frame work that has to happen for any gfx command buffer
     {
         // Process buffer delete queue
@@ -2468,8 +2680,8 @@ begin_gfx_command_buffer :: proc(
             vk.DestroyAccelerationStructureKHR(gd.device, as.handle, gd.alloc_callbacks)
         }
 
-        d_image_infos := make([dynamic]vk.DescriptorImageInfo, context.temp_allocator)
-        d_writes := make([dynamic]vk.WriteDescriptorSet, context.temp_allocator)
+        d_image_infos := make([dynamic]vk.DescriptorImageInfo, 0, queue.len(gd.pending_images), context.temp_allocator)
+        d_writes := make([dynamic]vk.WriteDescriptorSet, 0, queue.len(gd.pending_images), context.temp_allocator)
 
         // Record queue family ownership transfer for in-flight images
         {
@@ -2505,22 +2717,24 @@ begin_gfx_command_buffer :: proc(
                 }
                 cmd_gfx_pipeline_barriers(gd, cb_idx, {}, barriers)
 
-                // Save descriptor update data
-                append(&d_image_infos, vk.DescriptorImageInfo {
-                    imageView = underlying_image.image_view,
-                    imageLayout = .SHADER_READ_ONLY_OPTIMAL
-                })
-                append(&d_writes, vk.WriteDescriptorSet {
-                    sType = .WRITE_DESCRIPTOR_SET,
-                    pNext = nil,
-                    dstSet = gd.descriptor_set,
-                    dstBinding = u32(Bindless_Descriptor_Bindings.Images),
-                    dstArrayElement = u32(pending_image.handle.index),
-                    descriptorCount = 1,
-                    descriptorType = .SAMPLED_IMAGE,
-                    pImageInfo = &d_image_infos[write_ct]
-                })
-                write_ct += 1
+                {
+                    // Save descriptor update data
+                    append(&d_image_infos, vk.DescriptorImageInfo {
+                        imageView = underlying_image.image_view,
+                        imageLayout = .SHADER_READ_ONLY_OPTIMAL
+                    })
+                    append(&d_writes, vk.WriteDescriptorSet {
+                        sType = .WRITE_DESCRIPTOR_SET,
+                        pNext = nil,
+                        dstSet = gd.descriptor_set,
+                        dstBinding = u32(Bindless_Descriptor_Bindings.Images),
+                        dstArrayElement = u32(pending_image.handle.index),
+                        descriptorCount = 1,
+                        descriptorType = .SAMPLED_IMAGE,
+                        pImageInfo = &d_image_infos[write_ct]
+                    })
+                    write_ct += 1
+                }
             }
         }
 
@@ -2536,12 +2750,11 @@ begin_gfx_command_buffer :: proc(
 build_submit_infos :: proc(
     gd: ^GraphicsDevice,
     submit_infos: ^[dynamic]vk.SemaphoreSubmitInfoKHR,
-    semaphore_ops: [dynamic]Semaphore_Op
+    semaphore_ops: [dynamic]Semaphore_Op,
 ) -> bool {
-    count := len(semaphore_ops)
-    for i := 0; i < count; i += 1 {
+    for i in 0..<len(semaphore_ops) {
         sem := hm.get(gd.semaphores, hm.Handle(semaphore_ops[i].semaphore)) or_return
-        submit_infos[i] = vk.SemaphoreSubmitInfo{
+        info := vk.SemaphoreSubmitInfo{
             sType = .SEMAPHORE_SUBMIT_INFO_KHR,
             pNext = nil,
             semaphore = sem^,
@@ -2549,6 +2762,7 @@ build_submit_infos :: proc(
             stageMask = {.ALL_COMMANDS},    // @TODO: Is this heavy-handed or appropriate?
             deviceIndex = 0
         }
+        append(submit_infos, info)
     }
     return true
 }
@@ -2570,8 +2784,8 @@ submit_compute_command_buffer :: proc(
         deviceMask = 0
     }
 
-    wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.wait_ops), allocator = context.temp_allocator)
-    signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.signal_ops), allocator = context.temp_allocator)
+    wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, 0, len(sync.wait_ops), allocator = context.temp_allocator)
+    signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, 0, len(sync.signal_ops), allocator = context.temp_allocator)
     build_submit_infos(gd, &wait_infos, sync.wait_ops)
     build_submit_infos(gd, &signal_infos, sync.signal_ops)
 
@@ -2610,10 +2824,22 @@ submit_gfx_command_buffer :: proc(
     }
 
     // Make semaphore submit infos
-    wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.wait_ops), allocator = context.temp_allocator)
-    signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, len(sync.signal_ops), allocator = context.temp_allocator)
+    wait_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, 0, len(sync.wait_ops) + 1, allocator = context.temp_allocator)
+    signal_infos := make([dynamic]vk.SemaphoreSubmitInfoKHR, 0, len(sync.signal_ops), allocator = context.temp_allocator)
     build_submit_infos(gd, &wait_infos, sync.wait_ops)
     build_submit_infos(gd, &signal_infos, sync.signal_ops)
+
+    sem, ok := get_semaphore(gd, gd.frame_count_semaphore)
+    assert(ok)
+    gfx_timeline_info := vk.SemaphoreSubmitInfo {
+        sType = .SEMAPHORE_SUBMIT_INFO,
+        pNext = nil,
+        semaphore = sem^,
+        value = gd.frame_count + 1,
+        stageMask = {.ALL_COMMANDS},
+        deviceIndex = 0
+    }
+    append(&signal_infos, gfx_timeline_info)
 
     info := vk.SubmitInfo2{
         sType = .SUBMIT_INFO_2_KHR,
@@ -2744,11 +2970,6 @@ cmd_begin_render_pass :: proc(gd: ^GraphicsDevice, cb_idx: CommandBuffer_Index, 
 
 
     vk.CmdBeginRendering(cb, &info)
-}
-
-cmd_bind_gfx_descriptor_set :: proc(gd: ^GraphicsDevice, cb_idx: CommandBuffer_Index) {
-    cb := gd.gfx_command_buffers[cb_idx]
-    vk.CmdBindDescriptorSets(cb, .GRAPHICS, gd.gfx_pipeline_layout, 0, 1, &gd.descriptor_set, 0, nil)
 }
 
 cmd_bind_gfx_pipeline :: proc(
