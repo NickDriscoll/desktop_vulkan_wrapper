@@ -1657,19 +1657,20 @@ Pending_Image :: struct {
     mip_count: u32,
 }
 
-vk_format_pixel_size :: proc(format: vk.Format) -> int {
+vk_format_pixel_size :: #force_inline proc(format: vk.Format) -> int {
     #partial switch format {
         case .R8G8B8A8_UNORM: return 4
         case .R8G8B8A8_SRGB: return 4
         case .BC7_SRGB_BLOCK: return 1 //each 128-bit (16-byte) compressed texel block encodes a 4×4 rectangle
         case: {
             log.errorf("Tried to get byte size of unsupported pixel format (just add another switch case): %v", format)
+            assert(false)
         }
     }
     return 0
 }
 
-format_aspect_flags :: proc(format: vk.Format) -> vk.ImageAspectFlags {
+format_aspect_flags :: #force_inline proc(format: vk.Format) -> vk.ImageAspectFlags {
     if format == .D32_SFLOAT ||
         format == .D16_UNORM {
         return {.DEPTH}
@@ -1677,7 +1678,7 @@ format_aspect_flags :: proc(format: vk.Format) -> vk.ImageAspectFlags {
     return {.COLOR}
 }
 
-vk_format_block_size :: proc(format: vk.Format) -> int {
+vk_format_block_size :: #force_inline proc(format: vk.Format) -> int {
     #partial switch format {
         case .BC7_SRGB_BLOCK: return 16
         case .BC7_UNORM_BLOCK: return 16
@@ -2170,6 +2171,10 @@ sync_create_image_with_data :: proc(
     return
 }
 
+// This proc assumes that 'bytes' refers to the pixel data
+// of an image as large as the original image being updated,
+// such that this proc calculates which bytes in the buffer to upload
+// based on the subrect
 sync_update_image_data :: proc(
     gd: ^GraphicsDevice, 
     handle: Texture_Handle, 
@@ -2289,8 +2294,21 @@ sync_update_image_data :: proc(
         assert(remaining_bytes <= STAGING_BUFFER_SIZE)
 
         // Copy data to staging buffer
+        // p points to the whole image, so we need to manually
+        // pick out the rows referred to by subrect to copy to the staging buffer
+        format_pixel_size := vk_format_pixel_size(existing_image.format)
+        upload_pitch := int(subrect.extent.width) * format_pixel_size
         p := &bytes[amount_transferred]
-        mem.copy(sb_ptr, p, iter_size)
+        for y in 0..<int(subrect.extent.height) {
+            in_y := y + int(subrect.offset.y)
+            in_ptr, meok := slice.get_ptr(bytes, format_pixel_size * (in_y * int(existing_image.extent.width) + int(subrect.offset.x)))
+            assert(meok)
+            sp := cast(^byte)(uintptr(sb_ptr) + uintptr(y * upload_pitch))
+            mem.copy_non_overlapping(sp, in_ptr, upload_pitch)
+        }
+        // for (int y = 0; y < upload_h; y++)
+        //         memcpy(map + upload_pitch * y, tex->GetPixelsAt(upload_x, upload_y + y), (size_t)upload_pitch);
+        // mem.copy(sb_ptr, p, iter_size)
 
         // Begin transfer command buffer
         vk.BeginCommandBuffer(transfer_cb, &begin_info)
@@ -2310,7 +2328,7 @@ sync_update_image_data :: proc(
                     dst_queue_family = gd.transfer_queue_family,
                     image = existing_image.image,
                     subresource_range = {
-                        aspectMask = format_aspect_flags(existing_image.format),
+                        aspectMask = aspect_mask,
                         baseMipLevel = mip_level,
                         baseArrayLayer = array_layer,
                         levelCount = existing_image.mip_count,
@@ -2372,10 +2390,10 @@ sync_update_image_data :: proc(
                     dst_queue_family = gd.gfx_queue_family,
                     image = existing_image.image,
                     subresource_range = {
-                        aspectMask = {.COLOR},
-                        baseMipLevel = 0,
+                        aspectMask = aspect_mask,
+                        baseMipLevel = mip_level,
                         levelCount = existing_image.mip_count,
-                        baseArrayLayer = 0,
+                        baseArrayLayer = array_layer,
                         layerCount = existing_image.array_layers
                     }
                 }
@@ -2462,11 +2480,11 @@ sync_update_image_data :: proc(
                 dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
                 old_layout = .TRANSFER_DST_OPTIMAL,
                 new_layout = .SHADER_READ_ONLY_OPTIMAL,
-                src_queue_family = gd.gfx_queue_family,
-                dst_queue_family = gd.transfer_queue_family,
+                src_queue_family = gd.transfer_queue_family,
+                dst_queue_family = gd.gfx_queue_family,
                 image = existing_image.image,
                 subresource_range = {
-                    aspectMask = format_aspect_flags(existing_image.format),
+                    aspectMask = aspect_mask,
                     baseMipLevel = mip_level,
                     baseArrayLayer = array_layer,
                     levelCount = existing_image.mip_count,
@@ -2881,6 +2899,17 @@ submit_gfx_command_buffer :: proc(
         deviceIndex = 0
     }
     append(&signal_infos, gfx_timeline_info)
+    // scratch_sem, ok2 := get_semaphore(gd, gd.scratch_semaphore)
+    // assert(ok2)
+    // scratch_timeline_info := vk.SemaphoreSubmitInfo {
+    //     sType = .SEMAPHORE_SUBMIT_INFO,
+    //     pNext = nil,
+    //     semaphore = scratch_sem^,
+    //     value = gd.scratch_semaphore_value,
+    //     stageMask = {.ALL_COMMANDS},
+    //     deviceIndex = 0
+    // }
+    // append(&wait_infos, scratch_timeline_info)
 
     info := vk.SubmitInfo2{
         sType = .SUBMIT_INFO_2_KHR,
