@@ -1034,9 +1034,34 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
             alloc_flags = nil,
             name = "Null image"
         }
-        handle, ok := sync_create_image_with_data(&gd, &info, tex_data[:])
+        null_texture_handle, ok := sync_create_image_with_data(&gd, &info, tex_data[:])
         if !ok {
             log.error("Error creating null texture")
+        }
+
+        // Write null texture descriptor to every slot in descriptor set
+        {
+            im, imok := get_image(&gd, null_texture_handle)
+            assert(imok)
+            iminfos := make([dynamic]vk.DescriptorImageInfo, 0, MAXIMUM_BINDLESS_IMAGES, context.temp_allocator)
+            for i in 0..<MAXIMUM_BINDLESS_IMAGES {
+                im := vk.DescriptorImageInfo {
+                    imageView = im.image_view,
+                    imageLayout = .SHADER_READ_ONLY_OPTIMAL
+                }
+                append(&iminfos, im)
+            }
+            w := vk.WriteDescriptorSet {
+                sType = .WRITE_DESCRIPTOR_SET,
+                pNext = nil,
+                dstSet = gd.descriptor_set,
+                dstBinding = u32(Bindless_Descriptor_Bindings.Images),
+                dstArrayElement = 0,
+                descriptorCount = MAXIMUM_BINDLESS_IMAGES,
+                descriptorType = .SAMPLED_IMAGE,
+                pImageInfo = raw_data(iminfos)
+            }
+            vk.UpdateDescriptorSets(gd.device, 1, &w, 0, nil)
         }
     }
 
@@ -1732,6 +1757,8 @@ create_image :: proc(gd: ^GraphicsDevice, image_info: ^Image_Create) -> Texture_
     }
     image.extent = image_info.extent
     image.format = image_info.format
+    image.mip_count = mip_count
+    image.array_layers = image_info.array_layers
 
     // Create the image view
     {
@@ -2167,7 +2194,7 @@ sync_update_image_data :: proc(
     transfer_cb := gd.transfer_command_buffers[cb_idx]
     scratch_sem, ok := get_semaphore(gd, gd.scratch_semaphore)
     assert(ok)
-    semaphore, ok2 := get_semaphore(gd, gd.transfer_timeline)
+    transfer_sem, ok2 := get_semaphore(gd, gd.transfer_timeline)
     assert(ok2)
     gfx_sem, ok3 := get_semaphore(gd, gd.frame_count_semaphore)
     assert(ok3)
@@ -2176,7 +2203,7 @@ sync_update_image_data :: proc(
     {
         // Need to transfer image fron gfx queue to transfer queue
         vk.BeginCommandBuffer(gfx_cb, &begin_info)
-        cmd_gfx_pipeline_barriers(gd, cb_idx, {}, {
+        cmd_gfx_pipeline_barriers(gd, gfx_cb, {}, {
             Image_Barrier {
                 src_stage_mask = {.FRAGMENT_SHADER},
                 src_access_mask = {.SHADER_READ},
@@ -2204,7 +2231,7 @@ sync_update_image_data :: proc(
             commandBuffer = gfx_cb,
             deviceMask = 0
         }
-        
+
         // Signal the scratch semaphore
         new_timeline_value := gd.scratch_semaphore_value + 1
         signal_info := vk.SemaphoreSubmitInfo {
@@ -2227,7 +2254,7 @@ sync_update_image_data :: proc(
             stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
             deviceIndex = 0
         }
-        
+
         submit_info := vk.SubmitInfo2 {
             sType = .SUBMIT_INFO_2,
             pNext = nil,
@@ -2255,14 +2282,11 @@ sync_update_image_data :: proc(
     bytes_per_pixel := u32(vk_format_pixel_size(existing_image.format))
 
     bytes_size := len(bytes)
-    // if bytes_size > STAGING_BUFFER_SIZE {
-    //     log.errorf("Width: %v\nHeight: %v\nDepth: %v", create_info.extent.width, create_info.extent.height, create_info.extent.depth)
-    //     assert(false, "Image too big for staging buffer. Nick, stop being lazy.")
-    // }
     amount_transferred := 0
     for amount_transferred < bytes_size {
         remaining_bytes := bytes_size - amount_transferred
         iter_size := min(remaining_bytes, STAGING_BUFFER_SIZE)
+        assert(remaining_bytes <= STAGING_BUFFER_SIZE)
 
         // Copy data to staging buffer
         p := &bytes[amount_transferred]
@@ -2289,8 +2313,8 @@ sync_update_image_data :: proc(
                         aspectMask = format_aspect_flags(existing_image.format),
                         baseMipLevel = mip_level,
                         baseArrayLayer = array_layer,
-                        levelCount = 1,
-                        layerCount = 1,
+                        levelCount = existing_image.mip_count,
+                        layerCount = existing_image.array_layers,
                     }
                 }
             })
@@ -2374,7 +2398,7 @@ sync_update_image_data :: proc(
         signal_info := vk.SemaphoreSubmitInfo {
             sType = .SEMAPHORE_SUBMIT_INFO,
             pNext = nil,
-            semaphore = semaphore^,
+            semaphore = transfer_sem^,
             value = new_timeline_value,
             stageMask = {.ALL_COMMANDS},    // @TODO: This is a bit heavy-handed
             deviceIndex = 0
@@ -2409,19 +2433,35 @@ sync_update_image_data :: proc(
         gd.transfers_completed += 1
         amount_transferred += iter_size
     }
-    
+
+    // CPU wait on BufferImageCopy ops
+    // @TODO: Get rid of this it shouldn't even be that hard
+    {
+        cpu_wait_info := vk.SemaphoreWaitInfo {
+            sType = .SEMAPHORE_WAIT_INFO,
+            pNext = nil,
+            flags = nil,
+            semaphoreCount = 1,
+            pSemaphores = scratch_sem,
+            pValues = &gd.scratch_semaphore_value
+        }
+        if vk.WaitSemaphores(gd.device, &cpu_wait_info, max(u64)) != .SUCCESS {
+            log.error("Failed to wait for scratch semaphore.")
+        }
+    }
+
     // Receive transfer from transfer queue to gfx queue
     {
         // Need to transfer image fron gfx queue to transfer queue
         vk.BeginCommandBuffer(gfx_cb, &begin_info)
-        cmd_gfx_pipeline_barriers(gd, cb_idx, {}, {
+        cmd_gfx_pipeline_barriers(gd, gfx_cb, {}, {
             Image_Barrier {
-                src_stage_mask = {.FRAGMENT_SHADER},
-                src_access_mask = {.SHADER_READ},
-                dst_stage_mask = {.TRANSFER},
-                dst_access_mask = {.TRANSFER_WRITE},
-                old_layout = .SHADER_READ_ONLY_OPTIMAL,
-                new_layout = .TRANSFER_DST_OPTIMAL,
+                src_stage_mask = {.TRANSFER},
+                src_access_mask = {.TRANSFER_WRITE},
+                dst_stage_mask = {.ALL_COMMANDS},
+                dst_access_mask = {.MEMORY_READ,.MEMORY_WRITE},
+                old_layout = .TRANSFER_DST_OPTIMAL,
+                new_layout = .SHADER_READ_ONLY_OPTIMAL,
                 src_queue_family = gd.gfx_queue_family,
                 dst_queue_family = gd.transfer_queue_family,
                 image = existing_image.image,
@@ -2457,12 +2497,12 @@ sync_update_image_data :: proc(
         wait_info := vk.SemaphoreSubmitInfo {
             sType = .SEMAPHORE_SUBMIT_INFO,
             pNext = nil,
-            semaphore = scratch_sem^,
-            value = gd.scratch_semaphore_value,
+            semaphore = transfer_sem^,
+            value = gd.transfers_completed,
             stageMask = {.ALL_COMMANDS},
             deviceIndex = 0
         }
-        
+
         submit_info := vk.SubmitInfo2 {
             sType = .SUBMIT_INFO_2,
             pNext = nil,
@@ -2540,7 +2580,8 @@ acquire_swapchain_image :: proc(
 
     // Memory barrier between swapchain acquire and rendering
     swapchain_vkimage, _ := get_image_vkhandle(gd, swapchain_image_handle)
-    cmd_gfx_pipeline_barriers(gd, cb_idx, {}, {
+    cb := gd.gfx_command_buffers[idx]
+    cmd_gfx_pipeline_barriers(gd, cb, {}, {
         Image_Barrier {
             src_stage_mask = {.ALL_COMMANDS},
             src_access_mask = {.MEMORY_READ},
@@ -2715,7 +2756,7 @@ begin_gfx_command_buffer :: proc(
                         }
                     }
                 }
-                cmd_gfx_pipeline_barriers(gd, cb_idx, {}, barriers)
+                cmd_gfx_pipeline_barriers(gd, cb, {}, barriers)
 
                 {
                     // Save descriptor update data
@@ -2865,7 +2906,8 @@ submit_gfx_and_present :: proc(
 ) -> vk.Result {
     // Memory barrier between rendering to swapchain image and swapchain present
     swapchain_image, _ := get_image_vkhandle(gd, gd.swapchain_images[swapchain_idx^])
-    cmd_gfx_pipeline_barriers(gd, cb_idx, {}, {
+    cb := gd.gfx_command_buffers[cb_idx]
+    cmd_gfx_pipeline_barriers(gd, cb, {}, {
         Image_Barrier {
             src_stage_mask = {.COLOR_ATTACHMENT_OUTPUT},
             src_access_mask = {.MEMORY_WRITE},
@@ -3184,12 +3226,10 @@ Image_Barrier :: struct {
 // into the gfx command buffer at this point
 cmd_gfx_pipeline_barriers :: proc(
     gd: ^GraphicsDevice,
-    cb_idx: CommandBuffer_Index,
+    cb: vk.CommandBuffer,
     buffer_barriers: []Buffer_Barrier,
     image_barriers: []Image_Barrier
 ) {
-    cb := gd.gfx_command_buffers[cb_idx]
-
     buf_barriers := make([dynamic]vk.BufferMemoryBarrier2, 0, len(buffer_barriers), allocator = context.temp_allocator)
     for barrier in buffer_barriers {
         append(&buf_barriers, vk.BufferMemoryBarrier2 {
@@ -4162,7 +4202,7 @@ cmd_build_acceleration_structures :: proc(
     // AS buffer and the scratch buffer
     as_buffer, _ := get_buffer(gd, gd.AS_buffer)
     {
-        cmd_gfx_pipeline_barriers(gd, cb_idx, {
+        cmd_gfx_pipeline_barriers(gd, cb, {
             {
                 src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
                 src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
@@ -4186,7 +4226,7 @@ cmd_build_acceleration_structures :: proc(
 
     vk.CmdBuildAccelerationStructuresKHR(cb, u32(len(infos)), raw_data(g_infos), raw_data(range_info_ptrs))
 
-    cmd_gfx_pipeline_barriers(gd, cb_idx, {
+    cmd_gfx_pipeline_barriers(gd, cb, {
         {
             src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
             src_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
@@ -4200,4 +4240,3 @@ cmd_build_acceleration_structures :: proc(
 
     gd.AS_required_scratch_size = 0
 }
-
