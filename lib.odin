@@ -2300,15 +2300,12 @@ sync_update_image_data :: proc(
         upload_pitch := int(subrect.extent.width) * format_pixel_size
         p := &bytes[amount_transferred]
         for y in 0..<int(subrect.extent.height) {
-            in_y := y + int(subrect.offset.y)
-            in_ptr, meok := slice.get_ptr(bytes, format_pixel_size * (in_y * int(existing_image.extent.width) + int(subrect.offset.x)))
+            current_row := y + int(subrect.offset.y)
+            in_ptr, meok := slice.get_ptr(bytes, format_pixel_size * (current_row * int(existing_image.extent.width) + int(subrect.offset.x)))
             assert(meok)
             sp := cast(^byte)(uintptr(sb_ptr) + uintptr(y * upload_pitch))
             mem.copy_non_overlapping(sp, in_ptr, upload_pitch)
         }
-        // for (int y = 0; y < upload_h; y++)
-        //         memcpy(map + upload_pitch * y, tex->GetPixelsAt(upload_x, upload_y + y), (size_t)upload_pitch);
-        // mem.copy(sb_ptr, p, iter_size)
 
         // Begin transfer command buffer
         vk.BeginCommandBuffer(transfer_cb, &begin_info)
