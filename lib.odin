@@ -1981,6 +1981,7 @@ sync_create_image_with_data :: proc(
     // Staging buffer
     sb := hm.get(gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     sb_ptr := sb.alloc_info.mapped_data
+    assert(sb_ptr != nil)
 
     if !create_info.has_mipmaps {
         create_info.mip_count = 1
@@ -2281,6 +2282,7 @@ sync_update_image_data :: proc(
     // Staging buffer
     sb := hm.get(gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     sb_ptr := sb.alloc_info.mapped_data
+    assert(sb_ptr != nil)
 
     aspect_mask := format_aspect_flags(existing_image.format)
 
@@ -2294,18 +2296,7 @@ sync_update_image_data :: proc(
         assert(remaining_bytes <= STAGING_BUFFER_SIZE)
 
         // Copy data to staging buffer
-        // p points to the whole image, so we need to manually
-        // pick out the rows referred to by subrect to copy to the staging buffer
-        format_pixel_size := vk_format_pixel_size(existing_image.format)
-        upload_pitch := int(subrect.extent.width) * format_pixel_size
-        p := &bytes[amount_transferred]
-        for y in 0..<int(subrect.extent.height) {
-            current_row := y + int(subrect.offset.y)
-            in_ptr, meok := slice.get_ptr(bytes, format_pixel_size * (current_row * int(existing_image.extent.width) + int(subrect.offset.x)))
-            assert(meok)
-            sp := cast(^byte)(uintptr(sb_ptr) + uintptr(y * upload_pitch))
-            mem.copy_non_overlapping(sp, in_ptr, upload_pitch)
-        }
+        mem.copy_non_overlapping(sb_ptr, raw_data(bytes), len(bytes))
 
         // Begin transfer command buffer
         vk.BeginCommandBuffer(transfer_cb, &begin_info)
