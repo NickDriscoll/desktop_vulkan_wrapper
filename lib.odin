@@ -204,8 +204,8 @@ GraphicsDevice :: struct {
     // Deletion queues for resources
     buffer_deletes: queue.Queue(Buffer_Delete),
     image_deletes: queue.Queue(Image_Delete),
+    swapchain_deletes: queue.Queue(SwapchainDelete),
     AS_deletes: queue.Queue(AS_Delete),
-
 }
 
 // @TODO: What am I doing with this?
@@ -338,6 +338,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
             return gd, r
         }
     }
+    assert(gd.instance != nil, "Vulkan instance is nil.")
 
     // Load instance-level procedures
     vk.load_proc_addresses_instance(gd.instance)
@@ -831,7 +832,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
             pNext = &binding_flags_info,
             flags = {.UPDATE_AFTER_BIND_POOL},
             bindingCount = bindings_count,
-            pBindings = raw_data(bindings[:])
+            pBindings = raw_data(bindings)
         }
         if vk.CreateDescriptorSetLayout(gd.device, &layout_info, params.allocation_callbacks, &gd.descriptor_set_layout) != .SUCCESS {
             log.error("Failed to create static descriptor set layout.")
@@ -929,6 +930,7 @@ init_vulkan :: proc(params: InitParameters) -> (GraphicsDevice, vk.Result) {
         queue.init(&gd.pending_images)
         queue.init(&gd.buffer_deletes)
         queue.init(&gd.image_deletes)
+        queue.init(&gd.swapchain_deletes)
         queue.init(&gd.BLAS_queued_build_infos)
         queue.init(&gd.AS_deletes)
     }
@@ -1232,6 +1234,11 @@ SwapchainInfo :: struct {
     present_mode: vk.PresentModeKHR
 }
 
+SwapchainDelete :: struct {
+    death_frame: u64,
+    handle: vk.SwapchainKHR,
+}
+
 window_create_swapchain :: proc(gd: ^GraphicsDevice, info: SwapchainInfo) -> bool {
     surface_caps: vk.SurfaceCapabilitiesKHR
     vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gd.physical_device, gd.surface, &surface_caps)
@@ -1281,19 +1288,19 @@ window_create_swapchain :: proc(gd: ^GraphicsDevice, info: SwapchainInfo) -> boo
         return false
     }
 
-    vk.DestroySwapchainKHR(gd.device, gd.swapchain, gd.alloc_callbacks)
+    _delete_swapchain(gd, gd.swapchain)
     gd.swapchain = temp
 
     // Get swapchain images
     swapchain_images: [dynamic]vk.Image
-    image_count : u32 = 0
     {
+        image_count : u32 = 0
         vk.GetSwapchainImagesKHR(gd.device, gd.swapchain, &image_count, nil)
         swapchain_images = make([dynamic]vk.Image, image_count, context.temp_allocator)
         vk.GetSwapchainImagesKHR(gd.device, gd.swapchain, &image_count, raw_data(swapchain_images))
     }
 
-    swapchain_image_views := make([dynamic]vk.ImageView, image_count, context.temp_allocator)
+    swapchain_image_views := make([dynamic]vk.ImageView, len(swapchain_images), context.temp_allocator)
     // Create image views for the swapchain images for rendering
     {
         for vkimage, i in swapchain_images {
@@ -1322,11 +1329,10 @@ window_create_swapchain :: proc(gd: ^GraphicsDevice, info: SwapchainInfo) -> boo
     {
         clear(&gd.acquire_semaphores)
         clear(&gd.present_semaphores)
-        gd := gd
-        resize(&gd.acquire_semaphores, image_count)
-        resize(&gd.present_semaphores, image_count)
-        resize(&gd.swapchain_images, image_count)
-        for i : u32 = 0; i < image_count; i += 1 {
+        resize(&gd.acquire_semaphores, len(swapchain_images))
+        resize(&gd.present_semaphores, len(swapchain_images))
+        resize(&gd.swapchain_images, len(swapchain_images))
+        for i : u32 = 0; i < u32(len(swapchain_images)); i += 1 {
             im := Image {
                 image = swapchain_images[i],
                 image_view = swapchain_image_views[i]
@@ -1348,6 +1354,16 @@ window_create_swapchain :: proc(gd: ^GraphicsDevice, info: SwapchainInfo) -> boo
             strings.builder_reset(&sb)
         }
     }
+
+    return true
+}
+
+_delete_swapchain :: proc(gd: ^GraphicsDevice, swapchain: vk.SwapchainKHR) -> bool {
+    d := SwapchainDelete {
+        death_frame = gd.frame_count + u64(gd.frames_in_flight),
+        handle = swapchain,
+    }
+    queue.append(&gd.swapchain_deletes, d)
 
     return true
 }
@@ -2718,6 +2734,13 @@ begin_gfx_command_buffer :: proc(
             log.debugf("Destroying image %v...", image.image)
             vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
             vma.destroy_image(gd.allocator, image.image, image.allocation)
+        }
+
+        // Process swapchain delete queue
+        for queue.len(gd.swapchain_deletes) > 0 && queue.front_ptr(&gd.swapchain_deletes).death_frame == gd.frame_count {
+            s := queue.pop_front(&gd.swapchain_deletes)
+            log.debugf("Destroying swapchain %v", s.handle)
+            vk.DestroySwapchainKHR(gd.device, s.handle, gd.alloc_callbacks)
         }
 
         // Process acceleration structure delete queue
