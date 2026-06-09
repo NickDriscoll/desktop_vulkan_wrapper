@@ -129,6 +129,7 @@ GraphicsDevice :: struct {
     // these could be factored out
     surface: vk.SurfaceKHR,
     swapchain: vk.SwapchainKHR,
+    swapchain_format: vk.Format,
     swapchain_images: [dynamic]Texture_Handle,
     acquire_semaphores: [dynamic]Semaphore_Handle,
     present_semaphores: [dynamic]Semaphore_Handle,
@@ -1259,14 +1260,14 @@ window_create_swapchain :: proc(gd: ^GraphicsDevice, info: SwapchainInfo) -> boo
 
     min_images := max(gd.frames_in_flight, surface_caps.minImageCount)
 
-    image_format := vk.Format.B8G8R8A8_SRGB
+    gd.swapchain_format = vk.Format.B8G8R8A8_SRGB
     create_info := vk.SwapchainCreateInfoKHR {
         sType = .SWAPCHAIN_CREATE_INFO_KHR,
         pNext = nil,
         flags = nil,
         surface = gd.surface,
         minImageCount = min_images,
-        imageFormat = image_format,
+        imageFormat = gd.swapchain_format,
         imageColorSpace = .SRGB_NONLINEAR,
         imageExtent = vk.Extent2D {
             width = dimensions.x,
@@ -1310,7 +1311,7 @@ window_create_swapchain :: proc(gd: ^GraphicsDevice, info: SwapchainInfo) -> boo
                 flags = nil,
                 image = vkimage,
                 viewType = .D2,
-                format = image_format,
+                format = gd.swapchain_format,
                 components = IDENTITY_COMPONENT_SWIZZLE,
                 subresourceRange = {
                     aspectMask = {.COLOR},
@@ -1751,7 +1752,7 @@ create_image :: proc(gd: ^GraphicsDevice, image_info: ^Image_Create) -> Texture_
             usage = image_info.usage,
             sharingMode = .EXCLUSIVE,
             queueFamilyIndexCount = 1,
-            pQueueFamilyIndices = &gd.gfx_queue_family,
+            pQueueFamilyIndices = &gd.transfer_queue_family,
             initialLayout = .UNDEFINED
         }
         alloc_info := vma.Allocation_Create_Info {
@@ -1843,39 +1844,15 @@ new_bindless_image :: proc(gd: ^GraphicsDevice, info: ^Image_Create, layout: vk.
 
     aspect_mask := format_aspect_flags(info.format)
 
-    // Calculate mipmap count
-    mip_count : u32 = 1
-    if info.has_mipmaps {
-        // Mipmaps are only for 2D images at least rn
-        assert(info.image_type == .D2)
-
-        highest_bit_32 :: proc(n: u32) -> u32 {
-            n := n
-            i : u32 = 0
-
-            for n > 0 {
-                n = n >> 1
-                i += 1
-            }
-            return i
-        }
-
-        max_dim := max(info.extent.width, info.extent.height)
-        mip_count = highest_bit_32(max_dim)
-    }
-
-
     queue.push_back(&gd.pending_images, Pending_Image {
         handle = handle,
         old_layout = .UNDEFINED,
         new_layout = layout,
         aspect_mask = aspect_mask,
-        src_queue_family = gd.gfx_queue_family,
+        src_queue_family = gd.transfer_queue_family,
         array_layers = info.array_layers,
-        mip_count = mip_count,
+        mip_count = image.mip_count,
     })
-
-
 
     // Record queue family ownership transfer
     // @TODO: Barrier is overly opinionated about future usage
