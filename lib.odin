@@ -1891,7 +1891,7 @@ new_bindless_image :: proc(gd: ^VulkanGraphicsDevice, info: ^Image_Create, layou
             }
         }
     }
-    cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
+    cmd_pipeline_barriers(gd, cb, {}, barriers)
 
     vk.EndCommandBuffer(cb)
 
@@ -2030,7 +2030,7 @@ sync_create_image_with_data :: proc(
                     }
                 }
             }
-            cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
+            cmd_pipeline_barriers(gd, cb, {}, barriers)
         }
 
         min_blocksize := u32(vk_format_block_size(create_info.format))
@@ -2094,7 +2094,7 @@ sync_create_image_with_data :: proc(
                     }
                 }
             }
-            cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
+            cmd_pipeline_barriers(gd, cb, {}, barriers)
         }
 
         vk.EndCommandBuffer(cb)
@@ -2202,7 +2202,7 @@ sync_update_image_data :: proc(
     {
         // Need to transfer image fron gfx queue to transfer queue
         vk.BeginCommandBuffer(gfx_cb, &begin_info)
-        cmd_gfx_pipeline_barriers(gd, gfx_cb, {}, {
+        cmd_pipeline_barriers(gd, gfx_cb, {}, {
             Image_Barrier {
                 src_stage_mask = {.FRAGMENT_SHADER},
                 src_access_mask = {.SHADER_READ},
@@ -2297,7 +2297,7 @@ sync_update_image_data :: proc(
         // Record image layout transition on first iteration
         if amount_transferred == 0 {
             // Receive image from gfx queue on transfer queue
-            cmd_transfer_pipeline_barriers(gd, cb_idx, {}, {
+            cmd_pipeline_barriers(gd, transfer_cb, {}, {
                 Image_Barrier {
                     src_stage_mask = {.FRAGMENT_SHADER},
                     src_access_mask = {.SHADER_READ},
@@ -2379,7 +2379,7 @@ sync_update_image_data :: proc(
                     }
                 }
             }
-            cmd_transfer_pipeline_barriers(gd, cb_idx, {}, barriers)
+            cmd_pipeline_barriers(gd, transfer_cb, {}, barriers)
         }
 
         vk.EndCommandBuffer(transfer_cb)
@@ -2453,7 +2453,7 @@ sync_update_image_data :: proc(
     {
         // Need to transfer image fron gfx queue to transfer queue
         vk.BeginCommandBuffer(gfx_cb, &begin_info)
-        cmd_gfx_pipeline_barriers(gd, gfx_cb, {}, {
+        cmd_pipeline_barriers(gd, gfx_cb, {}, {
             Image_Barrier {
                 src_stage_mask = {.TRANSFER},
                 src_access_mask = {.TRANSFER_WRITE},
@@ -2577,7 +2577,7 @@ swapchain_acquire_dependencies :: proc(gd: ^VulkanGraphicsDevice, sync: ^SyncInf
     // Memory barrier between swapchain acquire and rendering
     swapchain_vkimage, _ := get_image_vkhandle(gd, swapchain_image_handle)
     cb := gd.gfx_command_buffers[idx]
-    cmd_gfx_pipeline_barriers(gd, cb, {}, {
+    cmd_pipeline_barriers(gd, cb, {}, {
         Image_Barrier {
             src_stage_mask = {.ALL_COMMANDS},
             src_access_mask = {.MEMORY_READ},
@@ -2759,7 +2759,7 @@ begin_gfx_command_buffer :: proc(
                         }
                     }
                 }
-                cmd_gfx_pipeline_barriers(gd, cb, {}, barriers)
+                cmd_pipeline_barriers(gd, cb, {}, barriers)
 
                 {
                     // Save descriptor update data
@@ -2921,7 +2921,7 @@ submit_gfx_and_present :: proc(
     // Memory barrier between rendering to swapchain image and swapchain present
     swapchain_image, _ := get_image_vkhandle(gd, gd.swapchain_images[swapchain_idx^])
     cb := gd.gfx_command_buffers[cb_idx]
-    cmd_gfx_pipeline_barriers(gd, cb, {}, {
+    cmd_pipeline_barriers(gd, cb, {}, {
         Image_Barrier {
             src_stage_mask = {.COLOR_ATTACHMENT_OUTPUT},
             src_access_mask = {.MEMORY_WRITE},
@@ -3238,7 +3238,7 @@ Image_Barrier :: struct {
 
 // Inserts an arbitrary number of memory barriers
 // into the gfx command buffer at this point
-cmd_gfx_pipeline_barriers :: proc(
+cmd_pipeline_barriers :: proc(
     gd: ^VulkanGraphicsDevice,
     cb: vk.CommandBuffer,
     buffer_barriers: []Buffer_Barrier,
@@ -3295,135 +3295,6 @@ cmd_gfx_pipeline_barriers :: proc(
     }
     vk.CmdPipelineBarrier2(cb, &info)
 }
-
-// Inserts an arbitrary number of memory barriers
-// into the compute command buffer at this point
-cmd_compute_pipeline_barriers :: proc(
-    gd: ^VulkanGraphicsDevice,
-    cb_idx: CommandBuffer_Index,
-    buffer_barriers: []Buffer_Barrier,
-    image_barriers: []Image_Barrier
-) {
-    cb := gd.compute_command_buffers[cb_idx]
-
-    buf_barriers := make([dynamic]vk.BufferMemoryBarrier2, 0, len(buffer_barriers), allocator = context.temp_allocator)
-    for barrier in buffer_barriers {
-        append(&buf_barriers, vk.BufferMemoryBarrier2 {
-            sType = .BUFFER_MEMORY_BARRIER_2,
-            pNext = nil,
-            srcStageMask = barrier.src_stage_mask,
-            srcAccessMask = barrier.src_access_mask,
-            dstStageMask = barrier.dst_stage_mask,
-            dstAccessMask = barrier.dst_access_mask,
-            srcQueueFamilyIndex = barrier.src_queue_family,
-            dstQueueFamilyIndex = barrier.dst_queue_family,
-            buffer = barrier.buffer,
-            offset = barrier.offset,
-            size = barrier.size,
-        })
-    }
-
-    im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(buffer_barriers), allocator = context.temp_allocator)
-    for barrier in image_barriers {
-        append(
-            &im_barriers,
-            vk.ImageMemoryBarrier2 {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                pNext = nil,
-                srcStageMask = barrier.src_stage_mask,
-                srcAccessMask = barrier.src_access_mask,
-                dstStageMask = barrier.dst_stage_mask,
-                dstAccessMask = barrier.dst_access_mask,
-                oldLayout = barrier.old_layout,
-                newLayout = barrier.new_layout,
-                srcQueueFamilyIndex = barrier.src_queue_family,
-                dstQueueFamilyIndex = barrier.dst_queue_family,
-                image = barrier.image,
-                subresourceRange = barrier.subresource_range
-            }
-        )
-    }
-
-    info := vk.DependencyInfo {
-        sType = .DEPENDENCY_INFO,
-        pNext = nil,
-        dependencyFlags = nil,
-        memoryBarrierCount = 0,
-        pMemoryBarriers = nil,
-        bufferMemoryBarrierCount = u32(len(buf_barriers)),
-        pBufferMemoryBarriers = raw_data(buf_barriers),
-        imageMemoryBarrierCount = u32(len(im_barriers)),
-        pImageMemoryBarriers = raw_data(im_barriers)
-    }
-    vk.CmdPipelineBarrier2(cb, &info)
-}
-
-// Inserts an arbitrary number of memory barriers
-// into the transfer command buffer at this point
-cmd_transfer_pipeline_barriers :: proc(
-    gd: ^VulkanGraphicsDevice,
-    cb_idx: CommandBuffer_Index,
-    buffer_barriers: []Buffer_Barrier,
-    image_barriers: []Image_Barrier
-) {
-    cb := gd.transfer_command_buffers[cb_idx]
-
-    buf_barriers := make([dynamic]vk.BufferMemoryBarrier2, 0, len(buffer_barriers), allocator = context.temp_allocator)
-    for barrier in buffer_barriers {
-        append(&buf_barriers, vk.BufferMemoryBarrier2 {
-            sType = .BUFFER_MEMORY_BARRIER_2,
-            pNext = nil,
-            srcStageMask = barrier.src_stage_mask,
-            srcAccessMask = barrier.src_access_mask,
-            dstStageMask = barrier.dst_stage_mask,
-            dstAccessMask = barrier.dst_access_mask,
-            srcQueueFamilyIndex = barrier.src_queue_family,
-            dstQueueFamilyIndex = barrier.dst_queue_family,
-            buffer = barrier.buffer,
-            offset = barrier.offset,
-            size = barrier.size,
-        })
-    }
-
-    im_barriers := make([dynamic]vk.ImageMemoryBarrier2, 0, len(image_barriers), context.temp_allocator)
-    for barrier in image_barriers {
-        append(
-            &im_barriers,
-            vk.ImageMemoryBarrier2 {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                pNext = nil,
-                srcStageMask = barrier.src_stage_mask,
-                srcAccessMask = barrier.src_access_mask,
-                dstStageMask = barrier.dst_stage_mask,
-                dstAccessMask = barrier.dst_access_mask,
-                oldLayout = barrier.old_layout,
-                newLayout = barrier.new_layout,
-                srcQueueFamilyIndex = barrier.src_queue_family,
-                dstQueueFamilyIndex = barrier.dst_queue_family,
-                image = barrier.image,
-                subresourceRange = barrier.subresource_range
-            }
-        )
-    }
-
-    info := vk.DependencyInfo {
-        sType = .DEPENDENCY_INFO,
-        pNext = nil,
-        dependencyFlags = nil,
-        memoryBarrierCount = 0,
-        pMemoryBarriers = nil,
-        bufferMemoryBarrierCount = u32(len(buf_barriers)),
-        pBufferMemoryBarriers = raw_data(buf_barriers),
-        imageMemoryBarrierCount = u32(len(im_barriers)),
-        pImageMemoryBarriers = raw_data(im_barriers)
-    }
-    vk.CmdPipelineBarrier2(cb, &info)
-}
-
-
-
-
-
 
 // Graphics pipeline section
 // Using a unified pipeline layout
@@ -4216,7 +4087,7 @@ cmd_build_acceleration_structures :: proc(
     // AS buffer and the scratch buffer
     as_buffer, _ := get_buffer(gd, gd.AS_buffer)
     {
-        cmd_gfx_pipeline_barriers(gd, cb, {
+        cmd_pipeline_barriers(gd, cb, {
             {
                 src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
                 src_access_mask = {.ACCELERATION_STRUCTURE_WRITE_KHR},
@@ -4240,7 +4111,7 @@ cmd_build_acceleration_structures :: proc(
 
     vk.CmdBuildAccelerationStructuresKHR(cb, u32(len(infos)), raw_data(g_infos), raw_data(range_info_ptrs))
 
-    cmd_gfx_pipeline_barriers(gd, cb, {
+    cmd_pipeline_barriers(gd, cb, {
         {
             src_stage_mask = {.ACCELERATION_STRUCTURE_BUILD_KHR},
             src_access_mask = {.ACCELERATION_STRUCTURE_READ_KHR,.ACCELERATION_STRUCTURE_WRITE_KHR},
