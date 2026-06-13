@@ -2969,6 +2969,10 @@ Framebuffer :: struct {
     depth_load_op: vk.AttachmentLoadOp
 }
 
+get_framebuffer_aspect_ratio :: proc(fb: Framebuffer) -> f32 {
+    return f32(fb.resolution.x) / f32(fb.resolution.y)
+}
+
 cmd_begin_render_pass :: proc(gd: ^VulkanGraphicsDevice, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
     cb := gd.gfx_command_buffers[cb_idx]
 
