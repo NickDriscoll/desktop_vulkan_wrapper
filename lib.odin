@@ -2973,6 +2973,7 @@ cmd_begin_render_pass :: proc(gd: ^VulkanGraphicsDevice, cb_idx: CommandBuffer_I
     cb := gd.gfx_command_buffers[cb_idx]
 
     iv, ok := hm.get(gd.images, hm.Handle(framebuffer.color_images[0]))
+    assert(ok)
     color_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO_KHR,
         pNext = nil,
