@@ -3301,6 +3301,12 @@ cmd_pipeline_barriers :: proc(
     vk.CmdPipelineBarrier2(cb, &info)
 }
 
+
+
+
+
+
+
 // Graphics pipeline section
 // Using a unified pipeline layout
 
@@ -3381,22 +3387,9 @@ ColorBlend_State :: struct {
     logic_op: vk.LogicOp,
     blend_constants: hlsl.float4,
     attachment: ColorBlend_Attachment
-    //attachments: [dynamic]ColorBlend_Attachment
 }
 
 default_colorblend_state :: proc() -> ColorBlend_State {
-    // attachments: [dynamic]ColorBlend_Attachment
-    // append(&attachments, ColorBlend_Attachment {
-    //     do_blend = true,
-    //     src_color_blend_factor = .SRC_ALPHA,
-    //     dst_color_blend_factor = .ONE_MINUS_SRC_ALPHA,
-    //     color_blend_op = .ADD,
-    //     src_alpha_blend_factor = .SRC_ALPHA,
-    //     dst_alpha_blend_factor = .ONE_MINUS_SRC_ALPHA,
-    //     alpha_blend_op = .ADD,
-    //     color_write_mask = {.R,.G,.B,.A}
-    // })
-
     return ColorBlend_State {
         flags = nil,
         do_logic_op = false,
@@ -3404,15 +3397,14 @@ default_colorblend_state :: proc() -> ColorBlend_State {
         blend_constants = {1.0, 1.0, 1.0, 1.0},
         attachment = ColorBlend_Attachment {
             do_blend = true,
-            src_color_blend_factor = .SRC_ALPHA,
+            src_color_blend_factor = .ONE,
             dst_color_blend_factor = .ONE_MINUS_SRC_ALPHA,
             color_blend_op = .ADD,
-            src_alpha_blend_factor = .SRC_ALPHA,
+            src_alpha_blend_factor = .ONE,
             dst_alpha_blend_factor = .ONE_MINUS_SRC_ALPHA,
             alpha_blend_op = .ADD,
             color_write_mask = {.R,.G,.B,.A}
         }
-        //attachments = attachments
     }
 }
 
