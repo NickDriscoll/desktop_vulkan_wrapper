@@ -242,14 +242,10 @@ InitParameters :: struct {
 init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result) {
     assert(params.frames_in_flight > 0)
 
-    comp_bytes_to_string :: proc(bytes: []byte, s: string) -> bool {
-        return string(bytes[0:len(s)]) == s
-    }
-
-    string_contained :: proc(list: []vk.ExtensionProperties, candidate: string) -> bool {
+    extension_in_list :: proc(list: []vk.ExtensionProperties, candidate: string) -> bool {
         for ext in list {
             name := ext.extensionName
-            if comp_bytes_to_string(name[:], candidate) {
+            if string(name[:len(candidate)]) == candidate {
                 return true
             }
         }
@@ -290,7 +286,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
             }
 
             for ext in exts {
-                if string_contained(supported_extensions[:], ext) {
+                if extension_in_list(supported_extensions[:], ext) {
                     append(&final_extensions, strings.clone_to_cstring(ext, context.temp_allocator))
                 } else {
                     log.errorf("Required instance extension %v not found.", ext)
@@ -351,11 +347,9 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         phys_devices := make([dynamic]vk.PhysicalDevice, phys_device_count, context.temp_allocator)
         vk.EnumeratePhysicalDevices(gd.instance, &phys_device_count, raw_data(phys_devices))
 
-        preferred_device_types : []vk.PhysicalDeviceType = {.DISCRETE_GPU,.INTEGRATED_GPU}
-
         // Select the physical device to use
         // @NOTE: We only support using a single physical device at once
-        features: vk.PhysicalDeviceFeatures2
+        preferred_device_types : []vk.PhysicalDeviceType = {.DISCRETE_GPU,.INTEGRATED_GPU}
         final_extensions := make([dynamic]cstring, 0, 16, context.temp_allocator)
         outer: for device_type in preferred_device_types {
             for pd in phys_devices {
@@ -374,6 +368,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
                     log.debugf("Considering physical device:\t%v", string_from_bytes(props.properties.deviceName[:]))
 
                     // Check physical device features
+                    features: vk.PhysicalDeviceFeatures2
                     vulkan_11_features: vk.PhysicalDeviceVulkan11Features
                     vulkan_12_features: vk.PhysicalDeviceVulkan12Features
                     dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures
@@ -415,7 +410,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
                     }
 
                     for ext in required_extensions {
-                        if !string_contained(supported_extensions[:], ext) {
+                        if !extension_in_list(supported_extensions[:], ext) {
                             log.errorf("Device doesn't have required extension: %v", ext)
                             return gd, .ERROR_EXTENSION_NOT_PRESENT
                         }
@@ -423,7 +418,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
                     }
                     if .Window in params.desired_features {
                         gd.support_flags += {.Window}
-                        if string_contained(supported_extensions[:], vk.KHR_SWAPCHAIN_EXTENSION_NAME) {
+                        if extension_in_list(supported_extensions[:], vk.KHR_SWAPCHAIN_EXTENSION_NAME) {
                             append(&final_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
                         } else {
                             log.errorf("Requested window support but %v was not found", vk.KHR_SWAPCHAIN_EXTENSION_NAME)
@@ -443,17 +438,16 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
                         rt_exts : []string = {
                             vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
                             vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-                            vk.KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
                             vk.KHR_RAY_QUERY_EXTENSION_NAME,
                         }
                         for ext in rt_exts {
-                            if !string_contained(supported_extensions[:], ext) {
+                            if !extension_in_list(supported_extensions[:], ext) {
                                 log.errorf("Requested raytracing support but %v was not found", ext)
                                 has_right_features = false
                                 break
                             }
                         }
-    
+
                         if !has_right_features {
                             gd.support_flags -= {.Raytracing}
                             vulkan_11_features.pNext = nil
@@ -468,12 +462,21 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
 
                     has_right_features :=
                         vulkan_11_features.variablePointers &&
+                        vulkan_11_features.variablePointersStorageBuffer &&
+                        vulkan_11_features.shaderDrawParameters &&
+                        vulkan_11_features.storagePushConstant16 &&
                         vulkan_12_features.descriptorIndexing &&
+                        vulkan_12_features.descriptorBindingSampledImageUpdateAfterBind &&
+                        vulkan_12_features.descriptorBindingPartiallyBound &&
                         vulkan_12_features.runtimeDescriptorArray &&
                         vulkan_12_features.timelineSemaphore &&
-                        vulkan_12_features.bufferDeviceAddress && 
+                        vulkan_12_features.bufferDeviceAddress &&
+                        vulkan_12_features.shaderFloat16 &&
                         dynamic_rendering_features.dynamicRendering &&
-                        sync2_features.synchronization2 
+                        sync2_features.synchronization2 &&
+                        features.features.samplerAnisotropy &&
+                        features.features.multiDrawIndirect &&
+                        features.features.geometryShader
                     if has_right_features {
                         gd.physical_device = pd
                         gd.physical_device_properties = props
@@ -485,6 +488,58 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
             }
         }
         assert(gd.physical_device != nil, "Didn't find suitable VkPhysicalDevice")
+
+        // Set up desired_features
+        desired_features: vk.PhysicalDeviceFeatures2
+        desired_vulkan_11_features: vk.PhysicalDeviceVulkan11Features
+        desired_vulkan_12_features: vk.PhysicalDeviceVulkan12Features
+        desired_dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures
+        desired_sync2_features: vk.PhysicalDeviceSynchronization2Features
+        desired_accel_features: vk.PhysicalDeviceAccelerationStructureFeaturesKHR
+        desired_rt_pipeline_features: vk.PhysicalDeviceRayTracingPipelineFeaturesKHR
+        desired_ray_query_features: vk.PhysicalDeviceRayQueryFeaturesKHR
+        desired_vulkan_11_features.sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES
+        desired_vulkan_12_features.sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+        desired_dynamic_rendering_features.sType = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES
+        desired_sync2_features.sType = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES
+        desired_accel_features.sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR
+        desired_rt_pipeline_features.sType = .PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR
+        desired_ray_query_features.sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR
+        desired_features.sType = .PHYSICAL_DEVICE_FEATURES_2
+        desired_rt_pipeline_features.pNext = &desired_ray_query_features
+        desired_accel_features.pNext = &desired_rt_pipeline_features
+        //desired_vulkan_11_features.pNext = &desired_accel_features
+        desired_vulkan_12_features.pNext = &desired_vulkan_11_features
+        desired_dynamic_rendering_features.pNext = &desired_vulkan_12_features
+        desired_sync2_features.pNext = &desired_dynamic_rendering_features
+        desired_features.pNext = &desired_sync2_features
+        desired_features.features.samplerAnisotropy = true
+        desired_features.features.multiDrawIndirect = true
+        // @TODO: Why the hell is this necessary?
+        desired_features.features.geometryShader = true
+        desired_vulkan_11_features.variablePointers = true
+        desired_vulkan_11_features.variablePointersStorageBuffer = true
+        desired_vulkan_11_features.shaderDrawParameters = true
+        // @TODO: I'd like to get rid of this one...
+        desired_vulkan_11_features.storagePushConstant16 = true
+        desired_vulkan_12_features.descriptorIndexing = true
+        desired_vulkan_12_features.descriptorBindingSampledImageUpdateAfterBind = true
+        desired_vulkan_12_features.descriptorBindingPartiallyBound = true
+        desired_vulkan_12_features.runtimeDescriptorArray = true
+        desired_vulkan_12_features.timelineSemaphore = true
+        desired_vulkan_12_features.bufferDeviceAddress = true
+        // @TODO: I'd like to get rid of this one...
+        desired_vulkan_12_features.shaderFloat16 = true
+        desired_dynamic_rendering_features.dynamicRendering = true
+        desired_sync2_features.synchronization2 = true
+        if .Raytracing in gd.support_flags {
+            desired_accel_features.accelerationStructure = true
+            desired_accel_features.descriptorBindingAccelerationStructureUpdateAfterBind = true
+            desired_rt_pipeline_features.rayTracingPipeline = true
+            desired_ray_query_features.rayQuery = true
+
+            desired_vulkan_11_features.pNext = &desired_accel_features
+        }
 
         // Query the physical device's queue family properties
         queue_family_count : u32 = 0
@@ -556,7 +611,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         // Create logical device
         create_info := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
-            pNext = &features,
+            pNext = &desired_features,
             flags = nil,
             queueCreateInfoCount = queue_count,
             pQueueCreateInfos = raw_data(&queue_create_infos),
