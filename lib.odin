@@ -192,11 +192,11 @@ VulkanGraphicsDevice :: struct {
     compute_pipeline_layout: vk.PipelineLayout,
 
     // Handle_Maps of all Vulkan objects
-    buffers: hm.Handle_Map(Buffer),
-    images: hm.Handle_Map(Image),
-    acceleration_structures: hm.Handle_Map(AccelerationStructure),
-    semaphores: hm.Handle_Map(vk.Semaphore),
-    pipelines: hm.Handle_Map(vk.Pipeline),
+    buffers: hm.HandleMap(Buffer),
+    images: hm.HandleMap(Image),
+    acceleration_structures: hm.HandleMap(AccelerationStructure),
+    semaphores: hm.HandleMap(vk.Semaphore),
+    pipelines: hm.HandleMap(vk.Pipeline),
 
     // Queue for images who's data has been uploaded
     // but which haven't been transferred to the gfx queue
