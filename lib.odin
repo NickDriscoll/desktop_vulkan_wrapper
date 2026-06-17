@@ -1020,7 +1020,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         gd.TLAS_instance_buffer = create_buffer(&gd, &info)
 
         // Set this handle to invalid so that it will be lazily allocated
-        gd.AS_scratch_buffer.generation = 0xFFFFFFFF
+        gd.AS_scratch_buffer.gen = 0xFFFFFFFF
 
         // Put dummy acceleration in slot 0 so that {index = 0, generation = 0}
         // Will always be a null AS
@@ -1184,23 +1184,27 @@ quit_vulkan :: proc(gd: ^VulkanGraphicsDevice) {
     vk.DestroySwapchainKHR(gd.device, gd.swapchain, gd.alloc_callbacks)
     vk.DestroySurfaceKHR(gd.instance, gd.surface, gd.alloc_callbacks)
 
-    for buffer in gd.buffers.values {
+    hm.iterate_callback(&gd.buffers, gd, proc(buffer: ^Buffer, handle: hm.Handle, userdata: rawptr) {
+        gd := cast(^VulkanGraphicsDevice)userdata
         vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
-    }
+    })
 
     // @TODO: Why does this cause a null-pointer dereference?
-    // for image in gd.images.values {
+    // hm.iterate_callback(&gd.images, gd, proc(image: ^Image, handle: hm.Handle, userdata: rawptr) {
+    //     gd := cast(^VulkanGraphicsDevice)userdata
     //     vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
     //     vma.destroy_image(gd.allocator, image.image, image.allocation)
-    // }
+    // })
 
-    for semaphore in gd.semaphores.values {
-        vk.DestroySemaphore(gd.device, semaphore, gd.alloc_callbacks)
-    }
+    hm.iterate_callback(&gd.semaphores, gd, proc(semaphore: ^vk.Semaphore, handle: hm.Handle, userdata: rawptr) {
+        gd := cast(^VulkanGraphicsDevice)userdata
+        vk.DestroySemaphore(gd.device, semaphore^, gd.alloc_callbacks)
+    })
 
-    for pipeline in gd.pipelines.values {
-        vk.DestroyPipeline(gd.device, pipeline, gd.alloc_callbacks)
-    }
+    hm.iterate_callback(&gd.pipelines, gd, proc(pipeline: ^vk.Pipeline, handle: hm.Handle, userdata: rawptr) {
+        gd := cast(^VulkanGraphicsDevice)userdata
+        vk.DestroyPipeline(gd.device, pipeline^, gd.alloc_callbacks)
+    })
 
     delete(gd.acquire_semaphores)
     delete(gd.present_semaphores)
@@ -1544,7 +1548,7 @@ create_buffer :: proc(gd: ^VulkanGraphicsDevice, buf_info: ^Buffer_Info) -> Buff
 }
 
 get_buffer :: proc(gd: ^VulkanGraphicsDevice, handle: Buffer_Handle) -> (^Buffer, bool) {
-    return hm.get(gd.buffers, hm.Handle(handle))
+    return hm.get(&gd.buffers, hm.Handle(handle))
 }
 
 // Blocking function for writing to a GPU buffer
@@ -1621,7 +1625,7 @@ sync_write_buffer :: proc(
                 build_submit_infos(gd, &signal_infos, sync.signal_ops)
 
                 // Increment transfer timeline counter
-                semaphore := hm.get(gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+                semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
                 new_timeline_value := gd.transfers_completed + 1
                 signal_info := vk.SemaphoreSubmitInfo {
                     sType = .SEMAPHORE_SUBMIT_INFO,
@@ -1652,7 +1656,7 @@ sync_write_buffer :: proc(
             // CPU wait
             // @TODO: Should be able to get rid of this wait by having
             // gfx queue wait on transfer timeline semaphore
-            semaphore := hm.get(gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+            semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
             new_timeline_value := gd.transfers_completed + 1
             wait_info := vk.SemaphoreWaitInfo {
                 sType = .SEMAPHORE_WAIT_INFO,
@@ -1892,7 +1896,7 @@ create_image :: proc(gd: ^VulkanGraphicsDevice, image_info: ^Image_Create) -> Te
 
 new_bindless_image :: proc(gd: ^VulkanGraphicsDevice, info: ^Image_Create, layout: vk.ImageLayout) -> Texture_Handle {
     handle := create_image(gd, info)
-    image, ok := hm.get(gd.images, hm.Handle(handle))
+    image, ok := hm.get(&gd.images, hm.Handle(handle))
     if !ok {
         log.error("Error in new_bindless_image()")
     }
@@ -1921,7 +1925,7 @@ new_bindless_image :: proc(gd: ^VulkanGraphicsDevice, info: ^Image_Create, layou
         pInheritanceInfo = nil
     })
 
-    semaphore, ok2 := hm.get(gd.semaphores, hm.Handle(gd.transfer_timeline))
+    semaphore, ok2 := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline))
     if !ok2 {
         log.error("Error getting transfer timeline semaphore")
     }
@@ -2001,11 +2005,11 @@ new_bindless_image :: proc(gd: ^VulkanGraphicsDevice, info: ^Image_Create, layou
 }
 
 get_image :: proc(gd: ^VulkanGraphicsDevice, handle: Texture_Handle) -> (^Image, bool) {
-    return hm.get(gd.images, hm.Handle(handle))
+    return hm.get(&gd.images, hm.Handle(handle))
 }
 
 get_image_vkhandle :: proc(gd: ^VulkanGraphicsDevice, handle: Texture_Handle) -> (h: vk.Image, ok: bool) {
-    im := hm.get(gd.images, hm.Handle(handle)) or_return
+    im := hm.get(&gd.images, hm.Handle(handle)) or_return
     return im.image, true
 }
 
@@ -2018,16 +2022,16 @@ sync_create_image_with_data :: proc(
 ) -> (out_handle: Texture_Handle, ok: bool) {
     // Create image first
     out_handle = create_image(gd, create_info)
-    out_image := hm.get(gd.images, hm.Handle(out_handle)) or_return
+    out_image := hm.get(&gd.images, hm.Handle(out_handle)) or_return
 
     extent := &create_info.extent
 
     cb_idx := CommandBuffer_Index(in_flight_idx(gd))
     cb := gd.transfer_command_buffers[cb_idx]
-    semaphore := hm.get(gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
+    semaphore := hm.get(&gd.semaphores, hm.Handle(gd.transfer_timeline)) or_return
 
     // Staging buffer
-    sb := hm.get(gd.buffers, hm.Handle(gd.staging_buffer)) or_return
+    sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     sb_ptr := sb.alloc_info.mapped_data
     assert(sb_ptr != nil)
 
@@ -2328,7 +2332,7 @@ sync_update_image_data :: proc(
     }
 
     // Staging buffer
-    sb := hm.get(gd.buffers, hm.Handle(gd.staging_buffer)) or_return
+    sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     sb_ptr := sb.alloc_info.mapped_data
     assert(sb_ptr != nil)
 
@@ -2593,7 +2597,7 @@ sync_update_image_data :: proc(
 }
 
 delete_image :: proc(gd: ^VulkanGraphicsDevice, handle: Texture_Handle) -> bool {
-    image := hm.get(gd.images, hm.Handle(handle)) or_return
+    image := hm.get(&gd.images, hm.Handle(handle)) or_return
 
     image_delete := Image_Delete {
         death_frame = gd.frame_count + u64(gd.frames_in_flight),
@@ -2827,7 +2831,7 @@ begin_gfx_command_buffer :: proc(
                         pNext = nil,
                         dstSet = gd.descriptor_set,
                         dstBinding = u32(Bindless_Descriptor_Bindings.Images),
-                        dstArrayElement = u32(pending_image.handle.index),
+                        dstArrayElement = u32(pending_image.handle.idx),
                         descriptorCount = 1,
                         descriptorType = .SAMPLED_IMAGE,
                         pImageInfo = &d_image_infos[write_ct]
@@ -2852,7 +2856,7 @@ build_submit_infos :: proc(
     semaphore_ops: [dynamic]Semaphore_Op,
 ) -> bool {
     for i in 0..<len(semaphore_ops) {
-        sem := hm.get(gd.semaphores, hm.Handle(semaphore_ops[i].semaphore)) or_return
+        sem := hm.get(&gd.semaphores, hm.Handle(semaphore_ops[i].semaphore)) or_return
         info := vk.SemaphoreSubmitInfo{
             sType = .SEMAPHORE_SUBMIT_INFO_KHR,
             pNext = nil,
@@ -3031,7 +3035,7 @@ get_framebuffer_aspect_ratio :: proc(fb: Framebuffer) -> f32 {
 cmd_begin_render_pass :: proc(gd: ^VulkanGraphicsDevice, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
     cb := gd.gfx_command_buffers[cb_idx]
 
-    iv, ok := hm.get(gd.images, hm.Handle(framebuffer.color_images[0]))
+    iv, ok := hm.get(&gd.images, hm.Handle(framebuffer.color_images[0]))
     assert(ok)
     color_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO_KHR,
@@ -3066,7 +3070,7 @@ cmd_begin_render_pass :: proc(gd: ^VulkanGraphicsDevice, cb_idx: CommandBuffer_I
     }
 
     depth_attachment: vk.RenderingAttachmentInfo
-    depth_image, ok2 := hm.get(gd.images, hm.Handle(framebuffer.depth_image))
+    depth_image, ok2 := hm.get(&gd.images, hm.Handle(framebuffer.depth_image))
     if ok2 {
         depth_attachment = vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
@@ -3094,7 +3098,7 @@ cmd_bind_gfx_pipeline :: proc(
     handle: Pipeline_Handle
 ) -> bool {
     cb := gd.gfx_command_buffers[cb_idx]
-    pipeline := hm.get(gd.pipelines, hm.Handle(handle)) or_return
+    pipeline := hm.get(&gd.pipelines, hm.Handle(handle)) or_return
     vk.CmdBindPipeline(cb, .GRAPHICS, pipeline^)
     return true
 }
@@ -3105,7 +3109,7 @@ cmd_bind_compute_pipeline :: proc(
     handle: Pipeline_Handle
 ) -> bool {
     cb := gd.compute_command_buffers[cb_idx]
-    pipeline := hm.get(gd.pipelines, hm.Handle(handle)) or_return
+    pipeline := hm.get(&gd.pipelines, hm.Handle(handle)) or_return
     vk.CmdBindPipeline(cb, .COMPUTE, pipeline^)
     return true
 }
@@ -3247,7 +3251,7 @@ create_semaphore :: proc(gd: ^VulkanGraphicsDevice, info: ^Semaphore_Info) -> Se
 }
 
 check_timeline_semaphore :: proc(gd: ^VulkanGraphicsDevice, handle: Semaphore_Handle) -> (val: u64, ok: bool) {
-    sem := hm.get(gd.semaphores, hm.Handle(handle)) or_return
+    sem := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
     v: u64
     if vk.GetSemaphoreCounterValue(gd.device, sem^, &v) != .SUCCESS {
         log.error("Failed to read value from timeline semaphore")
@@ -3257,11 +3261,11 @@ check_timeline_semaphore :: proc(gd: ^VulkanGraphicsDevice, handle: Semaphore_Ha
 }
 
 get_semaphore :: proc(gd: ^VulkanGraphicsDevice, handle: Semaphore_Handle) -> (^vk.Semaphore, bool) {
-    return hm.get(gd.semaphores, hm.Handle(handle))
+    return hm.get(&gd.semaphores, hm.Handle(handle))
 }
 
 destroy_semaphore :: proc(gd: ^VulkanGraphicsDevice, handle: Semaphore_Handle) -> bool {
-    semaphore := hm.get(gd.semaphores, hm.Handle(handle)) or_return
+    semaphore := hm.get(&gd.semaphores, hm.Handle(handle)) or_return
     vk.DestroySemaphore(gd.device, semaphore^, gd.alloc_callbacks)
 
     return true
@@ -4032,12 +4036,12 @@ create_acceleration_structure :: proc(
 }
 
 get_acceleration_structure :: proc(gd: ^VulkanGraphicsDevice, handle: Acceleration_Structure_Handle) -> (^AccelerationStructure, bool) {
-    as, b := hm.get(gd.acceleration_structures, handle)
+    as, b := hm.get(&gd.acceleration_structures, handle)
     return as, b
 }
 
 get_acceleration_structure_address :: proc(gd: ^VulkanGraphicsDevice, handle: Acceleration_Structure_Handle) -> vk.DeviceAddress {
-    blas, _ := hm.get(gd.acceleration_structures, handle)
+    blas, _ := hm.get(&gd.acceleration_structures, handle)
     addr_info := vk.AccelerationStructureDeviceAddressInfoKHR {
         sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
         pNext = nil,
@@ -4047,7 +4051,7 @@ get_acceleration_structure_address :: proc(gd: ^VulkanGraphicsDevice, handle: Ac
 }
 
 delete_acceleration_structure :: proc(gd: ^VulkanGraphicsDevice, handle: Acceleration_Structure_Handle) -> bool {
-    as := hm.get(gd.acceleration_structures, handle) or_return
+    as := hm.get(&gd.acceleration_structures, handle) or_return
     queue.append(&gd.AS_deletes, AS_Delete {
         death_frame = gd.frame_count + u64(gd.frames_in_flight),
         handle = as.handle
