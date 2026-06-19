@@ -1189,12 +1189,16 @@ quit_vulkan :: proc(gd: ^VulkanGraphicsDevice) {
         vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
     })
 
-    // @TODO: Why does this cause a null-pointer dereference?
-    // hm.iterate_callback(&gd.images, gd, proc(image: ^Image, handle: hm.Handle, userdata: rawptr) {
-    //     gd := cast(^VulkanGraphicsDevice)userdata
-    //     vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
-    //     vma.destroy_image(gd.allocator, image.image, image.allocation)
-    // })
+    // Remove swapchain image handles, so that we don't try to erroneously
+    // delete them ourselves
+    for handle in gd.swapchain_images {
+        hm.remove(&gd.images, handle)
+    }
+    hm.iterate_callback(&gd.images, gd, proc(image: ^Image, handle: hm.Handle, userdata: rawptr) {
+        gd := cast(^VulkanGraphicsDevice)userdata
+        vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
+        vma.destroy_image(gd.allocator, image.image, image.allocation)
+    })
 
     hm.iterate_callback(&gd.semaphores, gd, proc(semaphore: ^vk.Semaphore, handle: hm.Handle, userdata: rawptr) {
         gd := cast(^VulkanGraphicsDevice)userdata
@@ -1395,7 +1399,14 @@ window_create_swapchain :: proc(gd: ^VulkanGraphicsDevice, info: SwapchainInfo) 
         for i : u32 = 0; i < u32(len(swapchain_images)); i += 1 {
             im := Image {
                 image = swapchain_images[i],
-                image_view = swapchain_image_views[i]
+                image_view = swapchain_image_views[i],
+                extent = {
+                    width = create_info.imageExtent.width,
+                    height = create_info.imageExtent.height,
+                },
+                format = create_info.imageFormat,
+                mip_count = 1,
+                array_layers = 1
             }
             gd.swapchain_images[i] = Texture_Handle(hm.insert(&gd.images, im))
 
@@ -1891,7 +1902,8 @@ create_image :: proc(gd: ^VulkanGraphicsDevice, image_info: ^Image_Create) -> Te
         log.warn("Creating image with no debug name!")
     }
 
-    return Texture_Handle(hm.insert(&gd.images, image))
+    handle := hm.insert(&gd.images, image)
+    return Texture_Handle(handle)
 }
 
 new_bindless_image :: proc(gd: ^VulkanGraphicsDevice, info: ^Image_Create, layout: vk.ImageLayout) -> Texture_Handle {
