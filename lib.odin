@@ -104,7 +104,7 @@ SupportFlags :: bit_set[enum {
 
 // Distinct handle types for each Handle_Map in the Graphics_Device
 Buffer_Handle :: distinct hm.Handle
-Texture_Handle :: distinct hm.Handle
+Image_Handle :: distinct hm.Handle
 Acceleration_Structure_Handle :: distinct hm.Handle
 Semaphore_Handle :: distinct hm.Handle
 
@@ -130,7 +130,7 @@ VulkanGraphicsDevice :: struct {
     surface: vk.SurfaceKHR,
     swapchain: vk.SwapchainKHR,
     swapchain_format: vk.Format,
-    swapchain_images: [dynamic]Texture_Handle,
+    swapchain_images: [dynamic]Image_Handle,
     acquire_semaphores: [dynamic]Semaphore_Handle,
     present_semaphores: [dynamic]Semaphore_Handle,
     resize_window: bool,
@@ -1408,7 +1408,7 @@ window_create_swapchain :: proc(gd: ^VulkanGraphicsDevice, info: SwapchainInfo) 
                 mip_count = 1,
                 array_layers = 1
             }
-            gd.swapchain_images[i] = Texture_Handle(hm.insert(&gd.images, im))
+            gd.swapchain_images[i] = Image_Handle(hm.insert(&gd.images, im))
 
             sem_name := fmt.sbprintf(&sb, "Acquire binary #%v", i)
             info := Semaphore_Info {
@@ -1458,7 +1458,7 @@ resize_window :: proc(gd: ^VulkanGraphicsDevice, info: SwapchainInfo) -> bool {
     // The graphics device's swapchain should exist
     assert(gd.swapchain != 0)
 
-    old_swapchain_handles := make([dynamic]Texture_Handle, len(gd.swapchain_images), context.temp_allocator)
+    old_swapchain_handles := make([dynamic]Image_Handle, len(gd.swapchain_images), context.temp_allocator)
     for handle, i in gd.swapchain_images {
         old_swapchain_handles[i] = handle
     }
@@ -1735,7 +1735,7 @@ Image_Delete :: struct {
     allocation: vma.Allocation
 }
 Pending_Image :: struct {
-    handle: Texture_Handle,
+    handle: Image_Handle,
     old_layout: vk.ImageLayout,
     new_layout: vk.ImageLayout,
     aspect_mask: vk.ImageAspectFlags,
@@ -1779,7 +1779,7 @@ vk_format_block_size :: #force_inline proc(format: vk.Format) -> int {
     return 0
 }
 
-create_image :: proc(gd: ^VulkanGraphicsDevice, image_info: ^Image_Create) -> Texture_Handle {
+create_image :: proc(gd: ^VulkanGraphicsDevice, image_info: ^Image_Create) -> Image_Handle {
     // TRANSFER_DST is required for layout transitions period.
     // SAMPLED is required because all images in the system are
     // available in the bindless images array
@@ -1903,10 +1903,10 @@ create_image :: proc(gd: ^VulkanGraphicsDevice, image_info: ^Image_Create) -> Te
     }
 
     handle := hm.insert(&gd.images, image)
-    return Texture_Handle(handle)
+    return Image_Handle(handle)
 }
 
-new_bindless_image :: proc(gd: ^VulkanGraphicsDevice, info: ^Image_Create, layout: vk.ImageLayout) -> Texture_Handle {
+new_bindless_image :: proc(gd: ^VulkanGraphicsDevice, info: ^Image_Create, layout: vk.ImageLayout) -> Image_Handle {
     handle := create_image(gd, info)
     image, ok := hm.get(&gd.images, hm.Handle(handle))
     if !ok {
@@ -2016,11 +2016,11 @@ new_bindless_image :: proc(gd: ^VulkanGraphicsDevice, info: ^Image_Create, layou
     return handle
 }
 
-get_image :: proc(gd: ^VulkanGraphicsDevice, handle: Texture_Handle) -> (^Image, bool) {
+get_image :: proc(gd: ^VulkanGraphicsDevice, handle: Image_Handle) -> (^Image, bool) {
     return hm.get(&gd.images, hm.Handle(handle))
 }
 
-get_image_vkhandle :: proc(gd: ^VulkanGraphicsDevice, handle: Texture_Handle) -> (h: vk.Image, ok: bool) {
+get_image_vkhandle :: proc(gd: ^VulkanGraphicsDevice, handle: Image_Handle) -> (h: vk.Image, ok: bool) {
     im := hm.get(&gd.images, hm.Handle(handle)) or_return
     return im.image, true
 }
@@ -2031,7 +2031,7 @@ sync_create_image_with_data :: proc(
     gd: ^VulkanGraphicsDevice,
     create_info: ^Image_Create,
     bytes: []byte
-) -> (out_handle: Texture_Handle, ok: bool) {
+) -> (out_handle: Image_Handle, ok: bool) {
     // Create image first
     out_handle = create_image(gd, create_info)
     out_image := hm.get(&gd.images, hm.Handle(out_handle)) or_return
@@ -2242,7 +2242,7 @@ sync_create_image_with_data :: proc(
 // based on the subrect
 sync_update_image_data :: proc(
     gd: ^VulkanGraphicsDevice, 
-    handle: Texture_Handle, 
+    handle: Image_Handle, 
     subrect: vk.Rect2D,
     mip_level: u32,
     array_layer: u32,
@@ -2608,7 +2608,7 @@ sync_update_image_data :: proc(
     return true
 }
 
-delete_image :: proc(gd: ^VulkanGraphicsDevice, handle: Texture_Handle) -> bool {
+delete_image :: proc(gd: ^VulkanGraphicsDevice, handle: Image_Handle) -> bool {
     image := hm.get(&gd.images, hm.Handle(handle)) or_return
 
     image_delete := Image_Delete {
@@ -3032,8 +3032,8 @@ submit_gfx_and_present :: proc(
 
 MAX_FRAMEBUFFER_COLOR_IMAGES :: 8
 Framebuffer :: struct {
-    color_images: [MAX_FRAMEBUFFER_COLOR_IMAGES]Texture_Handle,
-    depth_image: Texture_Handle,
+    color_images: [MAX_FRAMEBUFFER_COLOR_IMAGES]Image_Handle,
+    depth_image: Image_Handle,
     resolution: hlsl.uint2,
     clear_color: hlsl.float4,
     color_load_op: vk.AttachmentLoadOp,
@@ -4070,6 +4070,13 @@ delete_acceleration_structure :: proc(gd: ^VulkanGraphicsDevice, handle: Acceler
     })
     hm.remove(&gd.acceleration_structures, handle)
     return true
+}
+
+delete_all_acceleration_structures :: proc(gd: ^VulkanGraphicsDevice) {
+    hm.iterate_callback(&gd.acceleration_structures, gd, proc(a: ^AccelerationStructure, h: hm.Handle, userdata: rawptr) {
+        gd := cast(^VulkanGraphicsDevice)userdata
+        delete_acceleration_structure(gd, Acceleration_Structure_Handle(h))
+    })
 }
 
 cmd_build_queued_blases :: proc(gd: ^VulkanGraphicsDevice) {
