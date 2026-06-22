@@ -99,6 +99,7 @@ clear_sync_info :: proc(s: ^SyncInfo) {
 
 SupportFlags :: bit_set[enum {
     Window,              // Will this device need to draw to window surface swapchains?
+    Multiview,           // Will this device need to do multiview drawing?
     Raytracing,          // Will this device need raytracing capabilities?
 }]
 
@@ -460,6 +461,15 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
                         vulkan_11_features.pNext = nil
                     }
 
+                    // Check for multiview
+                    if .Multiview in params.desired_features {
+                        gd.support_flags += {.Multiview}
+                        if !vulkan_11_features.multiview {
+                            log.error("Requested multiview but your device doesn't support it.")
+                            gd.support_flags -= {.Multiview}
+                        }
+                    }
+
                     has_right_features :=
                         vulkan_11_features.variablePointers &&
                         vulkan_11_features.variablePointersStorageBuffer &&
@@ -476,6 +486,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
                         sync2_features.synchronization2 &&
                         features.features.samplerAnisotropy &&
                         features.features.multiDrawIndirect &&
+                        features.features.drawIndirectFirstInstance &&
                         features.features.geometryShader
                     if has_right_features {
                         gd.physical_device = pd
@@ -515,6 +526,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         desired_features.pNext = &desired_sync2_features
         desired_features.features.samplerAnisotropy = true
         desired_features.features.multiDrawIndirect = true
+        desired_features.features.drawIndirectFirstInstance = true
         // @TODO: Why the hell is this necessary?
         desired_features.features.geometryShader = true
         desired_vulkan_11_features.variablePointers = true
@@ -532,6 +544,9 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         desired_vulkan_12_features.shaderFloat16 = true
         desired_dynamic_rendering_features.dynamicRendering = true
         desired_sync2_features.synchronization2 = true
+        if .Multiview in gd.support_flags {
+            desired_vulkan_11_features.multiview = true
+        }
         if .Raytracing in gd.support_flags {
             desired_accel_features.accelerationStructure = true
             desired_accel_features.descriptorBindingAccelerationStructureUpdateAfterBind = true
@@ -3044,21 +3059,26 @@ get_framebuffer_aspect_ratio :: proc(fb: Framebuffer) -> f32 {
     return f32(fb.resolution.x) / f32(fb.resolution.y)
 }
 
-cmd_begin_render_pass :: proc(gd: ^VulkanGraphicsDevice, cb_idx: CommandBuffer_Index, framebuffer: ^Framebuffer) {
+RenderPass :: struct {
+    fb: ^Framebuffer,
+    view_mask: u32,
+}
+
+cmd_begin_render_pass :: proc(gd: ^VulkanGraphicsDevice, cb_idx: CommandBuffer_Index, renderpass: RenderPass) {
     cb := gd.gfx_command_buffers[cb_idx]
 
-    iv, ok := hm.get(&gd.images, hm.Handle(framebuffer.color_images[0]))
+    iv, ok := hm.get(&gd.images, hm.Handle(renderpass.fb.color_images[0]))
     assert(ok)
     color_attachment := vk.RenderingAttachmentInfo {
         sType = .RENDERING_ATTACHMENT_INFO_KHR,
         pNext = nil,
         imageView = iv.image_view,
         imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
-        loadOp = framebuffer.color_load_op,
+        loadOp = renderpass.fb.color_load_op,
         storeOp = .STORE,
         clearValue = vk.ClearValue {
             color = vk.ClearColorValue {
-                float32 = cast([4]f32)framebuffer.clear_color
+                float32 = cast([4]f32)renderpass.fb.clear_color
             }
         }
     }
@@ -3069,12 +3089,12 @@ cmd_begin_render_pass :: proc(gd: ^VulkanGraphicsDevice, cb_idx: CommandBuffer_I
         flags = nil,
         renderArea = vk.Rect2D {
             extent = vk.Extent2D {
-                width = framebuffer.resolution.x,
-                height = framebuffer.resolution.y
+                width = renderpass.fb.resolution.x,
+                height = renderpass.fb.resolution.y
             }
         },
         layerCount = 1,
-        viewMask = 0,
+        viewMask = renderpass.view_mask,
         colorAttachmentCount = 1,
         pColorAttachments = &color_attachment,
         pDepthAttachment = nil,
@@ -3082,14 +3102,14 @@ cmd_begin_render_pass :: proc(gd: ^VulkanGraphicsDevice, cb_idx: CommandBuffer_I
     }
 
     depth_attachment: vk.RenderingAttachmentInfo
-    depth_image, ok2 := hm.get(&gd.images, hm.Handle(framebuffer.depth_image))
+    depth_image, ok2 := hm.get(&gd.images, hm.Handle(renderpass.fb.depth_image))
     if ok2 {
         depth_attachment = vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
             pNext = nil,
             imageView = depth_image.image_view,
             imageLayout = .DEPTH_ATTACHMENT_OPTIMAL,
-            loadOp = framebuffer.depth_load_op,
+            loadOp = renderpass.fb.depth_load_op,
             storeOp = .STORE,
             clearValue = {
                 depthStencil = {
@@ -3481,7 +3501,8 @@ default_colorblend_state :: proc() -> ColorBlend_State {
 
 PipelineRenderpass_Info :: struct {
     color_attachment_formats: []vk.Format,
-    depth_attachment_format: vk.Format
+    depth_attachment_format: vk.Format,
+    view_mask: u32,
 }
 
 create_shader_module :: proc(gd: ^VulkanGraphicsDevice, code: []u32) -> vk.ShaderModule {
@@ -3729,7 +3750,7 @@ create_graphics_pipelines :: proc(gd: ^VulkanGraphicsDevice, infos: []GraphicsPi
         renderpass_states[i] = vk.PipelineRenderingCreateInfo {
             sType = .PIPELINE_RENDERING_CREATE_INFO,
             pNext = nil,
-            viewMask = 0,
+            viewMask = info.renderpass_state.view_mask,
             colorAttachmentCount = u32(len(info.renderpass_state.color_attachment_formats)),
             pColorAttachmentFormats = raw_data(info.renderpass_state.color_attachment_formats),
             depthAttachmentFormat = info.renderpass_state.depth_attachment_format,
