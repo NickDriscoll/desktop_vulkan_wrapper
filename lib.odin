@@ -804,7 +804,6 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
     log.debugf("After create command buffers")
 
     // Create bindless descriptor set
-    samplers: [TOTAL_IMMUTABLE_SAMPLERS]vk.Sampler
     {
         // Create immutable samplers
         {
@@ -858,8 +857,8 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
             }
 
             for &s, i in sampler_infos {
-                vk.CreateSampler(gd.device, &s, params.allocation_callbacks, &samplers[i])
-                assign_debug_name(gd.device, .SAMPLER, u64(samplers[i]), debug_names[Immutable_Sampler_Index(i)])
+                vk.CreateSampler(gd.device, &s, params.allocation_callbacks, &gd.immutable_samplers[i])
+                assign_debug_name(gd.device, .SAMPLER, u64(gd.immutable_samplers[i]), debug_names[Immutable_Sampler_Index(i)])
             }
         }
 
@@ -875,7 +874,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
             descriptorType = .SAMPLER,
             descriptorCount = TOTAL_IMMUTABLE_SAMPLERS,
             stageFlags = {.FRAGMENT},
-            pImmutableSamplers = raw_data(samplers[:])
+            pImmutableSamplers = raw_data(gd.immutable_samplers[:])
         }
         AS_binding := vk.DescriptorSetLayoutBinding {
             binding = u32(Bindless_Descriptor_Bindings.AccelerationStructures),
@@ -1225,6 +1224,15 @@ quit_vulkan :: proc(gd: ^VulkanGraphicsDevice) {
         vk.DestroyPipeline(gd.device, pipeline^, gd.alloc_callbacks)
     })
 
+    hm.iterate_callback(&gd.acceleration_structures, gd, proc(as: ^AccelerationStructure, handle: hm.Handle, userdata: rawptr) {
+        gd := cast(^VulkanGraphicsDevice)userdata
+        vk.DestroyAccelerationStructureKHR(gd.device, as.handle, gd.alloc_callbacks)
+    })
+
+    // Bump frame count by frames-in-flight to force flush of delete queues
+    gd.frame_count += u64(gd.frames_in_flight)
+    _service_delete_queues(gd)
+
     delete(gd.acquire_semaphores)
     delete(gd.present_semaphores)
     delete(gd.swapchain_images)
@@ -1247,6 +1255,7 @@ quit_vulkan :: proc(gd: ^VulkanGraphicsDevice) {
 
     vk.DestroyPipelineLayout(gd.device, gd.gfx_pipeline_layout, gd.alloc_callbacks)
     vk.DestroyPipelineLayout(gd.device, gd.compute_pipeline_layout, gd.alloc_callbacks)
+    vk.DestroyDescriptorSetLayout(gd.device, gd.descriptor_set_layout, gd.alloc_callbacks)
     vk.DestroyDescriptorPool(gd.device, gd.descriptor_pool, gd.alloc_callbacks)
     vk.DestroyCommandPool(gd.device, gd.gfx_command_pool, gd.alloc_callbacks)
     vk.DestroyCommandPool(gd.device, gd.compute_command_pool, gd.alloc_callbacks)
@@ -2638,6 +2647,37 @@ delete_image :: proc(gd: ^VulkanGraphicsDevice, handle: Image_Handle) -> bool {
     return true
 }
 
+_service_delete_queues :: proc(gd: ^VulkanGraphicsDevice) {
+    // Process buffer delete queue
+    for queue.len(gd.buffer_deletes) > 0 && queue.front_ptr(&gd.buffer_deletes).death_frame == gd.frame_count {
+        buffer := queue.pop_front(&gd.buffer_deletes)
+        log.debugf("Destroying buffer %v...", buffer.buffer)
+        vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
+    }
+
+    // Process image delete queue
+    for queue.len(gd.image_deletes) > 0 && queue.front_ptr(&gd.image_deletes).death_frame == gd.frame_count {
+        image := queue.pop_front(&gd.image_deletes)
+        log.debugf("Destroying image %v...", image.image)
+        vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
+        vma.destroy_image(gd.allocator, image.image, image.allocation)
+    }
+
+    // Process swapchain delete queue
+    for queue.len(gd.swapchain_deletes) > 0 && queue.front_ptr(&gd.swapchain_deletes).death_frame == gd.frame_count {
+        s := queue.pop_front(&gd.swapchain_deletes)
+        log.debugf("Destroying swapchain %v", s.handle)
+        vk.DestroySwapchainKHR(gd.device, s.handle, gd.alloc_callbacks)
+    }
+
+    // Process acceleration structure delete queue
+    for queue.len(gd.AS_deletes) > 0 && queue.front_ptr(&gd.AS_deletes).death_frame == gd.frame_count {
+        as := queue.pop_front(&gd.AS_deletes)
+        log.debugf("Destroying acceleration structure %v...", as.handle)
+        vk.DestroyAccelerationStructureKHR(gd.device, as.handle, gd.alloc_callbacks)
+    }
+}
+
 acquire_swapchain_image :: proc(
     gd: ^VulkanGraphicsDevice,
     sync: ^SyncInfo,
@@ -2776,34 +2816,8 @@ begin_gfx_command_buffer :: proc(
 
     // Do per-frame work that has to happen for any gfx command buffer
     {
-        // Process buffer delete queue
-        for queue.len(gd.buffer_deletes) > 0 && queue.front_ptr(&gd.buffer_deletes).death_frame == gd.frame_count {
-            buffer := queue.pop_front(&gd.buffer_deletes)
-            log.debugf("Destroying buffer %v...", buffer.buffer)
-            vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
-        }
-
-        // Process image delete queue
-        for queue.len(gd.image_deletes) > 0 && queue.front_ptr(&gd.image_deletes).death_frame == gd.frame_count {
-            image := queue.pop_front(&gd.image_deletes)
-            log.debugf("Destroying image %v...", image.image)
-            vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
-            vma.destroy_image(gd.allocator, image.image, image.allocation)
-        }
-
-        // Process swapchain delete queue
-        for queue.len(gd.swapchain_deletes) > 0 && queue.front_ptr(&gd.swapchain_deletes).death_frame == gd.frame_count {
-            s := queue.pop_front(&gd.swapchain_deletes)
-            log.debugf("Destroying swapchain %v", s.handle)
-            vk.DestroySwapchainKHR(gd.device, s.handle, gd.alloc_callbacks)
-        }
-
-        // Process acceleration structure delete queue
-        for queue.len(gd.AS_deletes) > 0 && queue.front_ptr(&gd.AS_deletes).death_frame == gd.frame_count {
-            as := queue.pop_front(&gd.AS_deletes)
-            log.debugf("Destroying acceleration structure %v...", as.handle)
-            vk.DestroyAccelerationStructureKHR(gd.device, as.handle, gd.alloc_callbacks)
-        }
+        // Delete objects that need to be deleted
+        _service_delete_queues(gd)
 
         d_image_infos := make([dynamic]vk.DescriptorImageInfo, 0, queue.len(gd.pending_images), context.temp_allocator)
         d_writes := make([dynamic]vk.WriteDescriptorSet, 0, queue.len(gd.pending_images), context.temp_allocator)
