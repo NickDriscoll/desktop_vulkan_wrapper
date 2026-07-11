@@ -283,7 +283,11 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
                 exts : []string = {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_WIN32_SURFACE_EXTENSION_NAME}
             }
             when ODIN_OS == .Linux {
-                exts : []string = {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_XLIB_SURFACE_EXTENSION_NAME}
+                exts : []string = {
+                    vk.KHR_SURFACE_EXTENSION_NAME,
+                    vk.KHR_XLIB_SURFACE_EXTENSION_NAME,
+                    vk.KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+                }
             }
 
             for ext in exts {
