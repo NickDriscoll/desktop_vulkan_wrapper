@@ -12,7 +12,7 @@ import "core:strings"
 import "vendor:sdl2"
 import vk "vendor:vulkan"
 
-import "odin-vma/vma"
+import vma"odin-vma"
 import hm "handlemap"
 
 MAXIMUM_BINDLESS_IMAGES :: 1024 * 1024
@@ -282,6 +282,12 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
             when ODIN_OS == .Windows {
                 exts : []string = {vk.KHR_SURFACE_EXTENSION_NAME, vk.KHR_WIN32_SURFACE_EXTENSION_NAME}
             }
+            when ODIN_OS == .Darwin {
+                exts : []string = {
+                    vk.KHR_SURFACE_EXTENSION_NAME,
+                    vk.EXT_METAL_SURFACE_EXTENSION_NAME
+                }
+            }
             when ODIN_OS == .Linux {
                 exts : []string = {
                     vk.KHR_SURFACE_EXTENSION_NAME,
@@ -490,13 +496,14 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
                         sync2_features.synchronization2 &&
                         features.features.samplerAnisotropy &&
                         features.features.multiDrawIndirect &&
-                        features.features.drawIndirectFirstInstance &&
-                        features.features.geometryShader
+                        features.features.drawIndirectFirstInstance
                     if has_right_features {
                         gd.physical_device = pd
                         gd.physical_device_properties = props
                         log.infof("Chosen GPU: %s", string_from_bytes(props.properties.deviceName[:]))
                         break outer
+                    } else {
+                        log.errorf("%v failed to meet criteria.", string_from_bytes(props.properties.deviceName[:]))
                     }
                     clear(&final_extensions)
                 }
@@ -523,7 +530,6 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         desired_features.sType = .PHYSICAL_DEVICE_FEATURES_2
         desired_rt_pipeline_features.pNext = &desired_ray_query_features
         desired_accel_features.pNext = &desired_rt_pipeline_features
-        //desired_vulkan_11_features.pNext = &desired_accel_features
         desired_vulkan_12_features.pNext = &desired_vulkan_11_features
         desired_dynamic_rendering_features.pNext = &desired_vulkan_12_features
         desired_sync2_features.pNext = &desired_dynamic_rendering_features
@@ -531,13 +537,13 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         desired_features.features.samplerAnisotropy = true
         desired_features.features.multiDrawIndirect = true
         desired_features.features.drawIndirectFirstInstance = true
-        // @TODO: Why the hell is this necessary?
-        desired_features.features.geometryShader = true
         desired_vulkan_11_features.variablePointers = true
         desired_vulkan_11_features.variablePointersStorageBuffer = true
         desired_vulkan_11_features.shaderDrawParameters = true
+
         // @TODO: I'd like to get rid of this one...
         desired_vulkan_11_features.storagePushConstant16 = true
+
         desired_vulkan_12_features.descriptorIndexing = true
         desired_vulkan_12_features.descriptorBindingSampledImageUpdateAfterBind = true
         desired_vulkan_12_features.descriptorBindingPartiallyBound = true
@@ -662,20 +668,20 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         vk.GetPhysicalDeviceMemoryProperties2KHR = vk.GetPhysicalDeviceMemoryProperties2
         fns := vma.create_vulkan_functions()
 
-        info := vma.Allocator_Create_Info {
-            flags = {.Externally_Synchronized,.Buffer_Device_Address,.Ext_Memory_Budget},
-            physical_device = gd.physical_device,
+        info := vma.AllocatorCreateInfo {
+            flags = {.EXTERNALLY_SYNCHRONIZED,.BUFFER_DEVICE_ADDRESS,.EXT_MEMORY_BUDGET},
+            physicalDevice = gd.physical_device,
             device = gd.device,
-            preferred_large_heap_block_size = 0,
-            allocation_callbacks = params.allocation_callbacks,
-            device_memory_callbacks = nil,
-            heap_size_limit = nil,
-            vulkan_functions = &fns,
+            preferredLargeHeapBlockSize = 0,
+            pAllocationCallbacks = params.allocation_callbacks,
+            pDeviceMemoryCallbacks = nil,
+            pHeapSizeLimit = nil,
+            pVulkanFunctions = &fns,
             instance = gd.instance,
-            vulkan_api_version = api_version_int,
-            type_external_memory_handle_types = nil            
+            vulkanApiVersion = api_version_int,
+            pTypeExternalMemoryHandleTypes = nil            
         }
-        if vma.create_allocator(&info, &gd.allocator) != .SUCCESS {
+        if vma.CreateAllocator(info, &gd.allocator) != .SUCCESS {
             log.error("Failed to initialize VMA.")
         }
     }
@@ -1014,7 +1020,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         info := Buffer_Info {
             size = STAGING_BUFFER_SIZE,
             usage = {.TRANSFER_SRC},
-            alloc_flags = {.Mapped},
+            alloc_flags = {.MAPPED},
             required_flags = {.DEVICE_LOCAL,.HOST_VISIBLE,.HOST_COHERENT},
             name = "Global staging buffer",
         }
@@ -1034,7 +1040,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         info.size = MAX_TLAS_INSTANCES * size_of(vk.AccelerationStructureInstanceKHR) * vk.DeviceSize(gd.frames_in_flight)
         info.usage = {.ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,.TRANSFER_DST}
         info.required_flags += {.HOST_COHERENT,.HOST_VISIBLE}
-        info.alloc_flags = {.Mapped}
+        info.alloc_flags = {.MAPPED}
         gd.TLAS_instance_buffer = create_buffer(&gd, &info)
 
         // Set this handle to invalid so that it will be lazily allocated
@@ -1204,7 +1210,7 @@ quit_vulkan :: proc(gd: ^VulkanGraphicsDevice) {
 
     hm.iterate_callback(&gd.buffers, gd, proc(buffer: ^Buffer, handle: hm.Handle, userdata: rawptr) {
         gd := cast(^VulkanGraphicsDevice)userdata
-        vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
+        vma.DestroyBuffer(gd.allocator, buffer.buffer, buffer.allocation)
     })
 
     // Remove swapchain image handles, so that we don't try to erroneously
@@ -1215,7 +1221,7 @@ quit_vulkan :: proc(gd: ^VulkanGraphicsDevice) {
     hm.iterate_callback(&gd.images, gd, proc(image: ^Image, handle: hm.Handle, userdata: rawptr) {
         gd := cast(^VulkanGraphicsDevice)userdata
         vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
-        vma.destroy_image(gd.allocator, image.image, image.allocation)
+        vma.DestroyImage(gd.allocator, image.image, image.allocation)
     })
 
     hm.iterate_callback(&gd.semaphores, gd, proc(semaphore: ^vk.Semaphore, handle: hm.Handle, userdata: rawptr) {
@@ -1251,7 +1257,7 @@ quit_vulkan :: proc(gd: ^VulkanGraphicsDevice) {
     hm.destroy(&gd.semaphores)
     hm.destroy(&gd.pipelines)
 
-    vma.destroy_allocator(gd.allocator)
+    vma.DestroyAllocator(gd.allocator)
 
     for sampler in gd.immutable_samplers {
         vk.DestroySampler(gd.device, sampler, gd.alloc_callbacks)
@@ -1508,7 +1514,7 @@ in_flight_idx :: proc(gd: ^VulkanGraphicsDevice) -> u64 {
 Buffer_Info :: struct {
     size: vk.DeviceSize,
     usage: vk.BufferUsageFlags,
-    alloc_flags: vma.Allocation_Create_Flags,
+    alloc_flags: vma.AllocationCreateFlags,
     // queue_family: Queue_Family,
     required_flags: vk.MemoryPropertyFlags,
     name: string,
@@ -1518,7 +1524,7 @@ Buffer :: struct {
     buffer: vk.Buffer,
     address: vk.DeviceAddress,
     allocation: vma.Allocation,
-    alloc_info: vma.Allocation_Info,
+    alloc_info: vma.AllocationInfo,
 }
 
 Buffer_Delete :: struct {
@@ -1557,18 +1563,19 @@ create_buffer :: proc(gd: ^VulkanGraphicsDevice, buf_info: ^Buffer_Info) -> Buff
         queueFamilyIndexCount = u32(qfi_count),
         pQueueFamilyIndices = raw_data(qfis[:])
     }
-    alloc_info := vma.Allocation_Create_Info {
+    alloc_info := vma.AllocationCreateInfo {
         flags = buf_info.alloc_flags,
-        usage = .Auto,
-        required_flags = buf_info.required_flags,
-        preferred_flags = nil,
+        usage = .AUTO,
+        requiredFlags = buf_info.required_flags,
+        preferredFlags = nil,
         priority = 1.0
     }
     b: Buffer
-    r := vma.create_buffer(gd.allocator, &info, &alloc_info, &b.buffer, &b.allocation, &b.alloc_info)
+    r := vma.CreateBuffer(gd.allocator, info, alloc_info, &b.buffer, &b.allocation, &b.alloc_info)
     if r != .SUCCESS {
         log.errorf("Failed to create buffer: %v", r)
     }
+    assert(r == .SUCCESS)
 
     bda_info := vk.BufferDeviceAddressInfo {
         sType = .BUFFER_DEVICE_ADDRESS_INFO,
@@ -1612,15 +1619,15 @@ sync_write_buffer :: proc(
     total_bytes := len(in_bytes)
     bytes_transferred := 0
 
-    if out_buf.alloc_info.mapped_data != nil {
+    if out_buf.alloc_info.pMappedData != nil {
         in_p := &in_bytes[0]
-        out_p := rawptr(uintptr(out_buf.alloc_info.mapped_data) + uintptr(base_offset_bytes))
+        out_p := rawptr(uintptr(out_buf.alloc_info.pMappedData) + uintptr(base_offset_bytes))
         mem.copy(out_p, in_p, len(in_bytes))
     } else {
 
         // Staging buffer
         sb := get_buffer(gd, gd.staging_buffer) or_return
-        sb_ptr := sb.alloc_info.mapped_data
+        sb_ptr := sb.alloc_info.pMappedData
 
         for bytes_transferred < total_bytes {
             iter_size := min(total_bytes - bytes_transferred, STAGING_BUFFER_SIZE)
@@ -1743,14 +1750,14 @@ Image_Create :: struct {
     samples: vk.SampleCountFlags,
     tiling: vk.ImageTiling,
     usage: vk.ImageUsageFlags,
-    alloc_flags: vma.Allocation_Create_Flags,
+    alloc_flags: vma.AllocationCreateFlags,
     name: cstring
 }
 Image :: struct {
     image: vk.Image,
     image_view: vk.ImageView,
     allocation: vma.Allocation,
-    alloc_info: vma.Allocation_Info,
+    alloc_info: vma.AllocationInfo,
     extent: vk.Extent3D,
     format: vk.Format,
     mip_count: u32,
@@ -1853,17 +1860,17 @@ create_image :: proc(gd: ^VulkanGraphicsDevice, image_info: ^Image_Create) -> Im
             pQueueFamilyIndices = &gd.transfer_queue_family,
             initialLayout = .UNDEFINED
         }
-        alloc_info := vma.Allocation_Create_Info {
+        alloc_info := vma.AllocationCreateInfo {
             flags = image_info.alloc_flags,
-            usage = .Auto,
-            required_flags = {.DEVICE_LOCAL},
-            preferred_flags = nil,
+            usage = .AUTO,
+            requiredFlags = {.DEVICE_LOCAL},
+            preferredFlags = nil,
             priority = 1.0
         }
-        if vma.create_image(
+        if vma.CreateImage(
             gd.allocator,
-            &info,
-            &alloc_info,
+            info,
+            alloc_info,
             &image.image,
             &image.allocation,
             &image.alloc_info
@@ -2072,7 +2079,8 @@ sync_create_image_with_data :: proc(
 
     // Staging buffer
     sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
-    sb_ptr := sb.alloc_info.mapped_data
+    sb_ptr := sb.alloc_info.pMappedData
+    log.infof("%#v", sb)
     assert(sb_ptr != nil)
 
     if !create_info.has_mipmaps {
@@ -2373,7 +2381,7 @@ sync_update_image_data :: proc(
 
     // Staging buffer
     sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
-    sb_ptr := sb.alloc_info.mapped_data
+    sb_ptr := sb.alloc_info.pMappedData
     assert(sb_ptr != nil)
 
     aspect_mask := format_aspect_flags(existing_image.format)
@@ -2656,7 +2664,7 @@ _service_delete_queues :: proc(gd: ^VulkanGraphicsDevice) {
     for queue.len(gd.buffer_deletes) > 0 && queue.front_ptr(&gd.buffer_deletes).death_frame == gd.frame_count {
         buffer := queue.pop_front(&gd.buffer_deletes)
         log.debugf("Destroying buffer %v...", buffer.buffer)
-        vma.destroy_buffer(gd.allocator, buffer.buffer, buffer.allocation)
+        vma.DestroyBuffer(gd.allocator, buffer.buffer, buffer.allocation)
     }
 
     // Process image delete queue
@@ -2664,7 +2672,7 @@ _service_delete_queues :: proc(gd: ^VulkanGraphicsDevice) {
         image := queue.pop_front(&gd.image_deletes)
         log.debugf("Destroying image %v...", image.image)
         vk.DestroyImageView(gd.device, image.image_view, gd.alloc_callbacks)
-        vma.destroy_image(gd.allocator, image.image, image.allocation)
+        vma.DestroyImage(gd.allocator, image.image, image.allocation)
     }
 
     // Process swapchain delete queue
