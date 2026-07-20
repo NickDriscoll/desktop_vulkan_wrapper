@@ -2080,7 +2080,6 @@ sync_create_image_with_data :: proc(
     // Staging buffer
     sb := hm.get(&gd.buffers, hm.Handle(gd.staging_buffer)) or_return
     sb_ptr := sb.alloc_info.pMappedData
-    log.infof("%#v", sb)
     assert(sb_ptr != nil)
 
     if !create_info.has_mipmaps {
