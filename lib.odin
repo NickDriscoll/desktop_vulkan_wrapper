@@ -1020,7 +1020,7 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
         info := Buffer_Info {
             size = STAGING_BUFFER_SIZE,
             usage = {.TRANSFER_SRC},
-            alloc_flags = {.MAPPED},
+            alloc_flags = {.MAPPED,.HOST_ACCESS_SEQUENTIAL_WRITE},
             required_flags = {.DEVICE_LOCAL,.HOST_VISIBLE,.HOST_COHERENT},
             name = "Global staging buffer",
         }
@@ -1039,8 +1039,6 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
 
         info.size = MAX_TLAS_INSTANCES * size_of(vk.AccelerationStructureInstanceKHR) * vk.DeviceSize(gd.frames_in_flight)
         info.usage = {.ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,.TRANSFER_DST}
-        info.required_flags += {.HOST_COHERENT,.HOST_VISIBLE}
-        info.alloc_flags = {.MAPPED}
         gd.TLAS_instance_buffer = create_buffer(&gd, &info)
 
         // Set this handle to invalid so that it will be lazily allocated
