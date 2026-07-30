@@ -2682,7 +2682,6 @@ _service_delete_queues :: proc(gd: ^VulkanGraphicsDevice) {
     // Process acceleration structure delete queue
     for queue.len(gd.AS_deletes) > 0 && queue.front_ptr(&gd.AS_deletes).death_frame == gd.frame_count {
         as := queue.pop_front(&gd.AS_deletes)
-        log.debugf("Destroying acceleration structure %v...", as.handle)
         vk.DestroyAccelerationStructureKHR(gd.device, as.handle, gd.alloc_callbacks)
     }
 }
@@ -4052,7 +4051,6 @@ create_acceleration_structure :: proc(
             tlas_idx := u32(gd.frame_count) % gd.frames_in_flight
             offset += available_bytes * vk.DeviceSize(tlas_idx)
             offset = size_to_alignment(offset, AS_BUFFER_ALIGNMENT)
-            log.debugf("tlas_idx: %v\noffset: %v\n\n", tlas_idx, offset)
         }
 
         info := vk.AccelerationStructureCreateInfoKHR {
