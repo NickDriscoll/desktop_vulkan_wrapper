@@ -1779,6 +1779,7 @@ Pending_Image :: struct {
 
 vk_format_pixel_size :: #force_inline proc(format: vk.Format) -> int {
     #partial switch format {
+        case .R8_UNORM: return 1
         case .R8G8B8A8_UNORM: return 4
         case .R8G8B8A8_SRGB: return 4
         case .BC7_SRGB_BLOCK: return 1 //each 128-bit (16-byte) compressed texel block encodes a 4×4 rectangle
