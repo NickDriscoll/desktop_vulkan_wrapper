@@ -1805,6 +1805,7 @@ vk_format_block_size :: #force_inline proc(format: vk.Format) -> int {
         case .BC7_UNORM_BLOCK: return 16
         case .R8G8B8A8_UNORM: return 1
         case .R8G8B8A8_SRGB: return 1
+        case .R8_UNORM: return 1
         case: {
             log.errorf("Unsupported block size format: %v", format)
         }
