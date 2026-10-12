@@ -2839,7 +2839,7 @@ begin_gfx_command_buffer :: proc(
                 pending_image := queue.pop_front(&gd.pending_images)
                 underlying_image, ok := get_image(gd, pending_image.handle)
                 if !ok {
-                    log.errorf(
+                    log.debugf(
                         "Couldn't get pending image from handle %v\n" +
                         "It was probably destroyed <%v frames after creation",
                         pending_image.handle,
