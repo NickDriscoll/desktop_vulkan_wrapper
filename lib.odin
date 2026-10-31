@@ -199,7 +199,7 @@ VulkanGraphicsDevice :: struct {
     semaphores: hm.HandleMap(vk.Semaphore),
     pipelines: hm.HandleMap(vk.Pipeline),
 
-    // Queue for images who's data has been uploaded
+    // Queue for images whose data has been uploaded
     // but which haven't been transferred to the gfx queue
     pending_images: queue.Queue(Pending_Image),
 
@@ -601,8 +601,9 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
 
         queue_priority : f32 = 1.0
         queue_count : u32 = 1
+        next_queue_idx := 0 // Index of the next create struct you're going to insert
         queue_create_infos: [3]vk.DeviceQueueCreateInfo
-        queue_create_infos[0] = vk.DeviceQueueCreateInfo {
+        queue_create_infos[next_queue_idx] = vk.DeviceQueueCreateInfo {
             sType = .DEVICE_QUEUE_CREATE_INFO,
             pNext = nil,
             flags = nil,
@@ -610,9 +611,10 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
             queueCount = 1,
             pQueuePriorities = &queue_priority
         }
+        next_queue_idx += 1
         if gd.compute_queue_family != gd.gfx_queue_family {
             queue_count += 1
-            queue_create_infos[1] = vk.DeviceQueueCreateInfo {
+            queue_create_infos[next_queue_idx] = vk.DeviceQueueCreateInfo {
                 sType = .DEVICE_QUEUE_CREATE_INFO,
                 pNext = nil,
                 flags = nil,
@@ -620,10 +622,11 @@ init_vulkan :: proc(params: InitParameters) -> (VulkanGraphicsDevice, vk.Result)
                 queueCount = 1,
                 pQueuePriorities = &queue_priority
             }
+            next_queue_idx += 1
         }
         if gd.transfer_queue_family != gd.compute_queue_family {
             queue_count += 1
-            queue_create_infos[2] = vk.DeviceQueueCreateInfo {
+            queue_create_infos[next_queue_idx] = vk.DeviceQueueCreateInfo {
                 sType = .DEVICE_QUEUE_CREATE_INFO,
                 pNext = nil,
                 flags = nil,
